@@ -1,0 +1,159 @@
+<SEC-DOCUMENT>0001437749-26-037980.txt : 20261123
+<SEC-HEADER>0001437749-26-037980.hdr.sgml : 20261123
+<ACCEPTANCE-DATETIME>20261123080940
+ACCESSION NUMBER:		0001437749-26-037980
+CONFORMED SUBMISSION TYPE:	4
+PUBLIC DOCUMENT COUNT:		1
+CONFORMED PERIOD OF REPORT:	20261120
+FILED AS OF DATE:		20261123
+DATE AS OF CHANGE:		20261123
+
+REPORTING-OWNER:	
+
+	OWNER DATA:	
+		COMPANY CONFORMED NAME:			DEPASQUALE MICHAEL W
+		CENTRAL INDEX KEY:			0001246138
+		ORGANIZATION NAME:           	
+
+	FILING VALUES:
+		FORM TYPE:		4
+		SEC ACT:		1934 Act
+		SEC FILE NUMBER:	001-13463
+		FILM NUMBER:		261580892
+
+	MAIL ADDRESS:	
+		STREET 1:		1285 CORPORATE CENTER DR
+		STREET 2:		STE 175
+		CITY:			EAGAN
+		STATE:			MN
+		ZIP:			55121
+
+ISSUER:		
+
+	COMPANY DATA:	
+		COMPANY CONFORMED NAME:			BIO KEY INTERNATIONAL INC
+		CENTRAL INDEX KEY:			0001019034
+		STANDARD INDUSTRIAL CLASSIFICATION:	SERVICES-PREPACKAGED SOFTWARE [7372]
+		ORGANIZATION NAME:           	06 Technology
+		EIN:				411761861
+		STATE OF INCORPORATION:			DE
+		FISCAL YEAR END:			1231
+
+	BUSINESS ADDRESS:	
+		STREET 1:		101 CRAWFORDS CORNER RD
+		STREET 2:		SUITE 4116
+		CITY:			HOLMDEL
+		STATE:			NJ
+		ZIP:			07733
+		BUSINESS PHONE:		7323591100
+
+	MAIL ADDRESS:	
+		STREET 1:		101 CRAWFORDS CORNER RD
+		STREET 2:		SUITE 4116
+		CITY:			HOLMDEL
+		STATE:			NJ
+		ZIP:			07733
+
+	FORMER COMPANY:	
+		FORMER CONFORMED NAME:	SAC TECHNOLOGIES INC
+		DATE OF NAME CHANGE:	19961115
+</SEC-HEADER>
+<DOCUMENT>
+<TYPE>4
+<SEQUENCE>1
+<FILENAME>rdgdoc.xml
+<DESCRIPTION>FORM 4
+<TEXT>
+<XML>
+<?xml version="1.0"?>
+<ownershipDocument>
+
+    <schemaVersion>X0609</schemaVersion>
+
+    <documentType>4</documentType>
+
+    <periodOfReport>2026-11-20</periodOfReport>
+
+    <issuer>
+        <issuerCik>0001019034</issuerCik>
+        <issuerName>BIO KEY INTERNATIONAL INC</issuerName>
+        <issuerTradingSymbol>BKYI</issuerTradingSymbol>
+        <issuerForeignTradingSymbol></issuerForeignTradingSymbol>
+    </issuer>
+
+    <reportingOwner>
+        <reportingOwnerId>
+            <rptOwnerCik>0001246138</rptOwnerCik>
+            <rptOwnerName>DEPASQUALE MICHAEL W</rptOwnerName>
+        </reportingOwnerId>
+        <reportingOwnerAddress>
+            <rptOwnerNonUSAddressFlag>false</rptOwnerNonUSAddressFlag>
+            <rptOwnerStreet1>C/O BIO-KEY INTERNATIONAL, INC.</rptOwnerStreet1>
+            <rptOwnerStreet2>101 CRAWFORDS CORNER RD, SUITE 4116</rptOwnerStreet2>
+            <rptOwnerCity>HOLMDEL</rptOwnerCity>
+            <rptOwnerState>NJ</rptOwnerState>
+            <rptOwnerZipCode>07733</rptOwnerZipCode>
+            <rptOwnerStateDescription></rptOwnerStateDescription>
+        </reportingOwnerAddress>
+        <reportingOwnerRelationship>
+            <isDirector>1</isDirector>
+            <isOfficer>1</isOfficer>
+            <isOther>1</isOther>
+            <officerTitle>Chief Executive Officer</officerTitle>
+            <otherText>Chairman</otherText>
+        </reportingOwnerRelationship>
+    </reportingOwner>
+
+    <aff10b5One>0</aff10b5One>
+
+    <nonDerivativeTable>
+        <nonDerivativeTransaction>
+            <securityTitle>
+                <value>Common Stock</value>
+            </securityTitle>
+            <transactionDate>
+                <value>2026-11-20</value>
+            </transactionDate>
+            <transactionCoding>
+                <transactionFormType>5</transactionFormType>
+                <transactionCode>P</transactionCode>
+                <equitySwapInvolved>0</equitySwapInvolved>
+            </transactionCoding>
+            <transactionAmounts>
+                <transactionShares>
+                    <value>1000</value>
+                </transactionShares>
+                <transactionPricePerShare>
+                    <value>1.98</value>
+                </transactionPricePerShare>
+                <transactionAcquiredDisposedCode>
+                    <value>A</value>
+                </transactionAcquiredDisposedCode>
+            </transactionAmounts>
+            <postTransactionAmounts>
+                <sharesOwnedFollowingTransaction>
+                    <value>13764</value>
+                    <footnoteId id="F1"/>
+                </sharesOwnedFollowingTransaction>
+            </postTransactionAmounts>
+            <ownershipNature>
+                <directOrIndirectOwnership>
+                    <value>D</value>
+                </directOrIndirectOwnership>
+            </ownershipNature>
+        </nonDerivativeTransaction>
+    </nonDerivativeTable>
+
+    <footnotes>
+        <footnote id="F1">Holdings do not include options to purchase 24 shares and 917 shares issuable upon exercise of warrants. All share amounts reflect BIO-key's 1-for-10 reverse stock split, which was effective April 30, 2026.</footnote>
+    </footnotes>
+
+    <ownerSignature>
+        <signatureName>/s/ Michael DePasquale</signatureName>
+        <signatureDate>2026-11-23</signatureDate>
+    </ownerSignature>
+</ownershipDocument>
+</XML>
+</TEXT>
+</DOCUMENT>
+</SEC-DOCUMENT>

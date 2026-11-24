@@ -107,8 +107,19 @@ class InsiderTransactionRow(Base):
     shares: Mapped[Decimal] = mapped_column(DecimalText)
     price: Mapped[Decimal | None] = mapped_column(DecimalText, nullable=True)
     shares_owned_after: Mapped[Decimal | None] = mapped_column(DecimalText, nullable=True)
+    direct: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_10b5_1: Mapped[bool] = mapped_column(Boolean, default=False)
     accepted_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
     ingested_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
+class FilingTextRow(Base):
+    """Plain text of the documents relevant for analysis (e.g. 8-K body and EX-99 exhibits)."""
+
+    __tablename__ = "filing_texts"
+
+    accession: Mapped[str] = mapped_column(String(25), primary_key=True)
+    text: Mapped[str] = mapped_column(Text)
 
 
 class SignalRow(Base):
