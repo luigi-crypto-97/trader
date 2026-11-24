@@ -1,0 +1,40 @@
+# Limiti di rischio applicati dal motore deterministico (src/trader/risk/engine.py).
+# Percentuali espresse come frazioni dell'equity (0.12 = 12%).
+# Ogni modifica deve passare dai test: `uv run pytest tests/test_risk.py`.
+
+# Dimensionamento
+risk_per_trade_pct: 0.01        # perdita massima prevista per trade (entrata -> stop)
+max_position_pct: 0.12          # peso massimo di un singolo titolo
+max_positions: 10
+max_gross_exposure_pct: 1.0     # conto cash: nessuna leva
+min_conviction: 0.5
+default_stop_loss_pct: 0.08
+min_stop_loss_pct: 0.02
+max_stop_loss_pct: 0.20
+allow_fractional: true
+qty_step: 0.0001
+limit_offset_pct: 0.002         # limite d'acquisto = ask + 0,2%
+
+# Controlli sull'ordine
+min_order_value: 25             # USD
+max_commission_pct: 0.015       # commissione stimata / controvalore
+max_price_deviation_pct: 0.03   # protezione da errori di prezzo
+max_spread_pct: 0.02
+max_quote_age_seconds: 900
+min_price: 5                    # niente penny stock
+max_adv_pct: 0.01               # ordine <= 1% del controvalore medio giornaliero
+require_adv: true
+max_orders_per_day: 20
+
+# Limiti di perdita
+daily_loss_limit_pct: 0.03      # stop nuove entrate per la giornata
+max_drawdown_pct: 0.15          # attiva il kill switch
+
+# Universo (vuoto = tutti i titoli che superano i controlli)
+whitelist: []
+# La restricted list NON va qui: usa config/restricted_list.txt (escluso da git).
+restricted: []
+
+# Flusso di approvazione
+signal_ttl_minutes: 240
+signal_max_age_hours: 120

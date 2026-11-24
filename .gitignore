@@ -23,3 +23,6 @@ data/raw/
 .DS_Store
 .idea/
 .vscode/
+
+# Confidential: the restricted list reflects the firm's clients
+config/restricted_list.txt

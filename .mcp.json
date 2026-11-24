@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "trader": {
+      "command": "uv",
+      "args": ["run", "--quiet", "trader-mcp"]
+    }
+  }
+}

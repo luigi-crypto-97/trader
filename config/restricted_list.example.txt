@@ -1,0 +1,5 @@
+# Restricted list: un ticker per riga. Copia questo file in config/restricted_list.txt
+# (escluso da git: contiene informazioni riservate sui clienti dello studio).
+# I titoli elencati non possono essere acquistati da nessuna fonte di segnale; le uscite restano consentite.
+# Esempio:
+# ACME

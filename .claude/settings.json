@@ -1,0 +1,41 @@
+{
+  "enabledMcpjsonServers": ["trader"],
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest:*)",
+      "Bash(uv run ruff check:*)",
+      "Bash(uv run ruff format:*)",
+      "Bash(uv run mypy:*)",
+      "Bash(uv run trader status)",
+      "Bash(uv run trader doctor)",
+      "Bash(uv run trader signals list:*)",
+      "Bash(uv run trader signals show:*)",
+      "Bash(uv run trader audit verify)",
+      "Bash(uv run trader audit tail:*)",
+      "mcp__trader__get_status",
+      "mcp__trader__list_signals",
+      "mcp__trader__get_signal",
+      "mcp__trader__insider_activity",
+      "mcp__trader__recent_filings",
+      "mcp__trader__filing_text",
+      "mcp__trader__insider_clusters",
+      "mcp__trader__audit_tail"
+    ],
+    "ask": [
+      "mcp__trader__propose_signal",
+      "Bash(uv run trader approve:*)",
+      "Bash(uv run trader reject:*)",
+      "Bash(uv run trader kill:*)",
+      "Bash(uv run trader cycle:*)",
+      "Bash(uv run trader run:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./config/restricted_list.txt)",
+      "Edit(./config/restricted_list.txt)",
+      "Bash(cat .env:*)",
+      "Bash(cat config/restricted_list.txt:*)"
+    ]
+  }
+}
