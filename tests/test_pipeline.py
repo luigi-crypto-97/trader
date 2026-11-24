@@ -12,7 +12,7 @@ from trader.broker.commissions import IbkrTieredUS
 from trader.broker.simulated import SimulatedBroker
 from trader.config import RiskLimits, Settings
 from trader.db import Database, EquitySnapshotRow
-from trader.domain import OrderRequest, OrderStatus, OrderType, Quote, Side, Signal, SignalStatus
+from trader.domain import OrderRequest, OrderStatus, OrderType, Quote, Side, Signal
 from trader.pipeline import TradingSystem
 
 
@@ -30,8 +30,9 @@ class Clock:
 def quote(ticker: str, price: str, ts: datetime, spread: str = "0.02") -> Quote:
     p = D(price)
     half = D(spread) / 2
-    return Quote(ticker=ticker, ts=ts, bid=p - half, ask=p + half, last=p,
-                 avg_daily_dollar_volume=D("100000000"))
+    return Quote(
+        ticker=ticker, ts=ts, bid=p - half, ask=p + half, last=p, avg_daily_dollar_volume=D("100000000")
+    )
 
 
 class Recorder:
@@ -54,15 +55,28 @@ def env(tmp_path: Path):  # type: ignore[no-untyped-def]
     broker.set_quote(quote("ACME", "50", clock()))
     notifier = Recorder()
     system = TradingSystem(
-        db=db, broker=broker, limits=RiskLimits(), commissions=IbkrTieredUS(), audit=AuditLog(db),
-        notifier=notifier, clock=clock,
+        db=db,
+        broker=broker,
+        limits=RiskLimits(),
+        commissions=IbkrTieredUS(),
+        audit=AuditLog(db),
+        notifier=notifier,
+        clock=clock,
     )
     return system, broker, clock, notifier
 
 
 def make_signal(ticker: str = "ACME", key: str = "k1", horizon: int = 30, at: datetime = NOW) -> Signal:
-    return Signal(source="test", ticker=ticker, horizon_days=horizon, conviction=D("0.8"),
-                  stop_loss_pct=D("0.08"), thesis="test thesis", dedup_key=key, created_at=at)
+    return Signal(
+        source="test",
+        ticker=ticker,
+        horizon_days=horizon,
+        conviction=D("0.8"),
+        stop_loss_pct=D("0.08"),
+        thesis="test thesis",
+        dedup_key=key,
+        created_at=at,
+    )
 
 
 def test_full_lifecycle_entry_approval_fill_stop_exit(env) -> None:  # type: ignore[no-untyped-def]
@@ -133,8 +147,14 @@ def test_restricted_ticker_never_reaches_approval(tmp_path: Path) -> None:
     db = Database(f"sqlite:///{tmp_path / 'r.sqlite'}")
     broker = SimulatedBroker(settled_cash=D("1000"), clock=clock)
     broker.set_quote(quote("ACME", "50", clock()))
-    system = TradingSystem(db=db, broker=broker, limits=RiskLimits(restricted=["ACME"]),
-                           commissions=IbkrTieredUS(), audit=AuditLog(db), clock=clock)
+    system = TradingSystem(
+        db=db,
+        broker=broker,
+        limits=RiskLimits(restricted=["ACME"]),
+        commissions=IbkrTieredUS(),
+        audit=AuditLog(db),
+        clock=clock,
+    )
     sig = make_signal()
     system.submit_signal(sig)
     system.run_cycle()
@@ -177,8 +197,15 @@ def test_kill_switch_blocks_new_entries(env) -> None:  # type: ignore[no-untyped
 def test_drawdown_trips_kill_switch(env) -> None:  # type: ignore[no-untyped-def]
     system, *_ = env
     with system.db.session() as s:
-        s.add(EquitySnapshotRow(ts=NOW - timedelta(days=10), equity=D("1300"), settled_cash=D("1300"),
-                                unsettled_cash=D("0"), positions_value=D("0")))
+        s.add(
+            EquitySnapshotRow(
+                ts=NOW - timedelta(days=10),
+                equity=D("1300"),
+                settled_cash=D("1300"),
+                unsettled_cash=D("0"),
+                positions_value=D("0"),
+            )
+        )
     system.run_cycle()
     assert system.kill_switch_on()
 

@@ -35,8 +35,17 @@ TRIAGE_CHARS = 20_000
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 EVENT_TYPES = [
-    "earnings", "guidance", "m_and_a", "contract_win", "regulatory_approval", "financing",
-    "management_change", "restructuring", "litigation", "dividend_buyback", "other",
+    "earnings",
+    "guidance",
+    "m_and_a",
+    "contract_win",
+    "regulatory_approval",
+    "financing",
+    "management_change",
+    "restructuring",
+    "litigation",
+    "dividend_buyback",
+    "other",
 ]
 
 
@@ -51,8 +60,17 @@ class LlmRefusal(LlmError):
 class TriageResult(BaseModel):
     relevant: bool
     event_type: Literal[
-        "earnings", "guidance", "m_and_a", "contract_win", "regulatory_approval", "financing",
-        "management_change", "restructuring", "litigation", "dividend_buyback", "other",
+        "earnings",
+        "guidance",
+        "m_and_a",
+        "contract_win",
+        "regulatory_approval",
+        "financing",
+        "management_change",
+        "restructuring",
+        "litigation",
+        "dividend_buyback",
+        "other",
     ]
     summary: str
 
@@ -89,8 +107,15 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
         "key_risks": {"type": "array", "items": {"type": "string"}},
         "evidence_quotes": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["action", "horizon_days", "conviction", "stop_loss_pct", "thesis", "key_risks",
-                 "evidence_quotes"],
+    "required": [
+        "action",
+        "horizon_days",
+        "conviction",
+        "stop_loss_pct",
+        "thesis",
+        "key_risks",
+        "evidence_quotes",
+    ],
     "additionalProperties": False,
 }
 
@@ -182,7 +207,8 @@ def _norm(s: str) -> str:
 
 def verify_quotes(quotes: list[str], text: str) -> tuple[list[str], list[str]]:
     haystack = _norm(text)
-    ok, bad = [], []
+    ok: list[str] = []
+    bad: list[str] = []
     for q in quotes:
         (ok if q.strip() and _norm(q) in haystack else bad).append(q)
     return ok, bad
@@ -233,20 +259,33 @@ class FilingAnalyzer:
             self._header(filing)
             + f"\nOpening {len(opening)} of {len(text)} characters:\n<filing>\n{opening}\n</filing>"
         )
-        data, usage = self.caller(model=self.triage_model, system=TRIAGE_SYSTEM, user=triage_user,
-                                  schema=TRIAGE_SCHEMA, max_tokens=4000, effort="low")
+        data, usage = self.caller(
+            model=self.triage_model,
+            system=TRIAGE_SYSTEM,
+            user=triage_user,
+            schema=TRIAGE_SCHEMA,
+            max_tokens=4000,
+            effort="low",
+        )
         usages = [usage]
         try:
             triage = TriageResult.model_validate(data)
         except ValidationError as exc:
             return AnalysisOutcome(acc, None, "triage", f"invalid triage output: {exc}", usages)
         if not triage.relevant:
-            return AnalysisOutcome(acc, None, "triage", f"not relevant ({triage.event_type}): {triage.summary}",
-                                   usages)
+            return AnalysisOutcome(
+                acc, None, "triage", f"not relevant ({triage.event_type}): {triage.summary}", usages
+            )
 
         user = self._header(filing) + f"\nFull filing text:\n<filing>\n{text}\n</filing>"
-        data, usage = self.caller(model=self.analysis_model, system=ANALYSIS_SYSTEM, user=user,
-                                  schema=ANALYSIS_SCHEMA, max_tokens=16000, effort=self.analysis_effort)
+        data, usage = self.caller(
+            model=self.analysis_model,
+            system=ANALYSIS_SYSTEM,
+            user=user,
+            schema=ANALYSIS_SCHEMA,
+            max_tokens=16000,
+            effort=self.analysis_effort,
+        )
         usages.append(usage)
         try:
             result = AnalysisResult.model_validate(data)
@@ -258,8 +297,13 @@ class FilingAnalyzer:
             return AnalysisOutcome(acc, None, "analysis", f"conviction {result.conviction} too low", usages)
         verified, unverified = verify_quotes(result.evidence_quotes, text)
         if not verified or unverified:
-            return AnalysisOutcome(acc, None, "verification",
-                                   f"evidence quotes not found verbatim in filing: {unverified}", usages)
+            return AnalysisOutcome(
+                acc,
+                None,
+                "verification",
+                f"evidence quotes not found verbatim in filing: {unverified}",
+                usages,
+            )
         signal = Signal(
             source=SOURCE,
             ticker=filing.ticker,
@@ -268,8 +312,13 @@ class FilingAnalyzer:
             stop_loss_pct=Decimal(str(round(result.stop_loss_pct, 4))),
             thesis=f"[8-K {triage.event_type}] {result.thesis}",
             evidence=[
-                {"accession": acc, "url": filing.url, "accepted_at": filing.accepted_at.isoformat(),
-                 "items": filing.items, "model": self.analysis_model},
+                {
+                    "accession": acc,
+                    "url": filing.url,
+                    "accepted_at": filing.accepted_at.isoformat(),
+                    "items": filing.items,
+                    "model": self.analysis_model,
+                },
                 *({"quote": q} for q in verified),
                 *({"risk": r} for r in result.key_risks),
             ],

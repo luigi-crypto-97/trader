@@ -57,6 +57,7 @@ log = logging.getLogger(__name__)
 
 KILL_SWITCH_KEY = "kill_switch"
 LAST_FILL_KEY = "last_fill_ts"
+LAST_ACCOUNT_KEY = "last_account"
 
 
 class Notifier(Protocol):
@@ -84,6 +85,32 @@ class CycleReport:
     expired: int = 0
     new_fills: int = 0
     notes: list[str] = field(default_factory=list)
+
+
+def submit_signal(db: Database, audit: AuditLog, signal: Signal, now: datetime) -> bool:
+    """Store a PROPOSED signal unless its dedup key exists. Shared by the pipeline and MCP server."""
+    with db.session() as s:
+        if s.scalar(select(SignalRow.id).where(SignalRow.dedup_key == signal.dedup_key)):
+            return False
+        s.add(
+            SignalRow(
+                id=signal.id,
+                created_at=signal.created_at,
+                updated_at=now,
+                source=signal.source,
+                ticker=signal.ticker,
+                side=signal.side.value,
+                horizon_days=signal.horizon_days,
+                conviction=signal.conviction,
+                stop_loss_pct=signal.stop_loss_pct,
+                thesis=signal.thesis,
+                evidence=dumps(signal.evidence),
+                dedup_key=signal.dedup_key,
+                status=SignalStatus.PROPOSED.value,
+            )
+        )
+    audit.record("signal.proposed", signal.model_dump(mode="json"), ts=now)
+    return True
 
 
 def signal_row_to_dict(row: SignalRow) -> dict[str, Any]:
@@ -138,8 +165,9 @@ class TradingSystem:
         return bool(state.get("on", False))
 
     def set_kill_switch(self, on: bool, *, reason: str, actor: str) -> None:
-        self.db.kv_set(KILL_SWITCH_KEY, {"on": on, "reason": reason, "actor": actor,
-                                         "ts": self.clock().isoformat()})
+        self.db.kv_set(
+            KILL_SWITCH_KEY, {"on": on, "reason": reason, "actor": actor, "ts": self.clock().isoformat()}
+        )
         self.audit.record("kill_switch", {"on": on, "reason": reason, "actor": actor}, ts=self.clock())
         self.notifier.notify(f"Kill switch {'ON' if on else 'OFF'} ({actor}): {reason}")
 
@@ -156,6 +184,7 @@ class TradingSystem:
                     positions_value=account.positions_value,
                 )
             )
+        self.db.kv_set(LAST_ACCOUNT_KEY, account.model_dump(mode="json"))
         return account
 
     def _day_start(self) -> datetime:
@@ -187,30 +216,7 @@ class TradingSystem:
     # --------------------------------------------------------------- signals
     def submit_signal(self, signal: Signal) -> bool:
         """Insert a new PROPOSED signal. Returns False if its dedup key was already seen."""
-        now = self.clock()
-        with self.db.session() as s:
-            exists = s.scalar(select(SignalRow.id).where(SignalRow.dedup_key == signal.dedup_key))
-            if exists:
-                return False
-            s.add(
-                SignalRow(
-                    id=signal.id,
-                    created_at=signal.created_at,
-                    updated_at=now,
-                    source=signal.source,
-                    ticker=signal.ticker,
-                    side=signal.side.value,
-                    horizon_days=signal.horizon_days,
-                    conviction=signal.conviction,
-                    stop_loss_pct=signal.stop_loss_pct,
-                    thesis=signal.thesis,
-                    evidence=dumps(signal.evidence),
-                    dedup_key=signal.dedup_key,
-                    status=SignalStatus.PROPOSED.value,
-                )
-            )
-        self.audit.record("signal.proposed", signal.model_dump(mode="json"), ts=now)
-        return True
+        return submit_signal(self.db, self.audit, signal, self.clock())
 
     def _set_status(self, signal_id: str, status: SignalStatus, reason: str = "", **fields: Any) -> None:
         with self.db.session() as s:
@@ -259,7 +265,9 @@ class TradingSystem:
     def _rows(self, status: SignalStatus) -> list[SignalRow]:
         with self.db.session() as s:
             return list(
-                s.scalars(select(SignalRow).where(SignalRow.status == status.value).order_by(SignalRow.created_at))
+                s.scalars(
+                    select(SignalRow).where(SignalRow.status == status.value).order_by(SignalRow.created_at)
+                )
             )
 
     # ---------------------------------------------------------------- review
@@ -304,18 +312,30 @@ class TradingSystem:
             )
             if decision.trip_kill_switch and not self.kill_switch_on():
                 self.set_kill_switch(True, reason="max drawdown breached", actor="risk-engine")
-            plan_json = dumps({"entry": plan.as_dict(), "risk": decision.as_dict(),
-                               "quote": quote.model_dump(mode="json")})
+            plan_json = dumps(
+                {"entry": plan.as_dict(), "risk": decision.as_dict(), "quote": quote.model_dump(mode="json")}
+            )
             if not decision.approved:
                 self._set_status(row.id, SignalStatus.REJECTED_RISK, decision.summary(), plan=plan_json)
                 continue
             if self.approval_mode == "auto":
-                self._set_status(row.id, SignalStatus.APPROVED, "auto-approved", plan=plan_json,
-                                 decided_by="auto", expires_at=self.clock() + timedelta(minutes=30))
+                self._set_status(
+                    row.id,
+                    SignalStatus.APPROVED,
+                    "auto-approved",
+                    plan=plan_json,
+                    decided_by="auto",
+                    expires_at=self.clock() + timedelta(minutes=30),
+                )
             else:
                 expires = self.clock() + timedelta(minutes=self.limits.signal_ttl_minutes)
-                self._set_status(row.id, SignalStatus.PENDING_APPROVAL, "awaiting human approval",
-                                 plan=plan_json, expires_at=expires)
+                self._set_status(
+                    row.id,
+                    SignalStatus.PENDING_APPROVAL,
+                    "awaiting human approval",
+                    plan=plan_json,
+                    expires_at=expires,
+                )
                 pending += 1
                 details = self.get_signal(row.id)
                 if details is not None:
@@ -381,11 +401,16 @@ class TradingSystem:
                 continue
             result = self._place(order, purpose="ENTRY", signal_id=row.id)
             if result.status is OrderStatus.REJECTED:
-                self._set_status(row.id, SignalStatus.FAILED, f"broker rejected: {result.message}",
-                                 order_client_id=order.client_order_id)
+                self._set_status(
+                    row.id,
+                    SignalStatus.FAILED,
+                    f"broker rejected: {result.message}",
+                    order_client_id=order.client_order_id,
+                )
                 continue
-            self._set_status(row.id, SignalStatus.ORDERED, result.status.value,
-                             order_client_id=order.client_order_id)
+            self._set_status(
+                row.id, SignalStatus.ORDERED, result.status.value, order_client_id=order.client_order_id
+            )
             executed += 1
             account = self.broker.account()
         return executed
@@ -488,8 +513,9 @@ class TradingSystem:
             if fill.side is Side.BUY and order is not None and order.signal_id:
                 sig = s.get(SignalRow, order.signal_id)
                 if sig is not None:
-                    stop_pct = Decimal(json.loads(sig.plan).get("entry", {}).get("stop_loss_pct",
-                                                                                 str(sig.stop_loss_pct)))
+                    stop_pct = Decimal(
+                        json.loads(sig.plan).get("entry", {}).get("stop_loss_pct", str(sig.stop_loss_pct))
+                    )
                     plan = s.get(PositionPlanRow, fill.ticker)
                     stop = round_price_down(fill.price * (1 - stop_pct))
                     if plan is None:
@@ -541,8 +567,12 @@ class TradingSystem:
                 limit = round_price_down(quote.bid * (1 - 2 * self.limits.limit_offset_pct))
                 order = OrderRequest(ticker=ticker, side=Side.SELL, qty=position.qty, limit_price=limit)
             else:
-                order = OrderRequest(ticker=ticker, side=Side.SELL, qty=position.qty, order_type=OrderType.MARKET)
-            decision = self.risk.evaluate(order, quote=quote, account=account, state=self.risk_state(), now=now)
+                order = OrderRequest(
+                    ticker=ticker, side=Side.SELL, qty=position.qty, order_type=OrderType.MARKET
+                )
+            decision = self.risk.evaluate(
+                order, quote=quote, account=account, state=self.risk_state(), now=now
+            )
             if not decision.approved:
                 self.audit.record("exit.blocked", {"ticker": ticker, "reason": decision.summary()}, ts=now)
                 self.notifier.notify(f"ATTENZIONE: uscita {ticker} bloccata: {decision.summary()}")
@@ -604,8 +634,13 @@ class TradingSystem:
             "settled_cash": str(account.settled_cash),
             "unsettled_cash": str(account.unsettled_cash),
             "positions": {
-                t: {"qty": str(p.qty), "avg_cost": str(p.avg_cost), "market_price": str(p.market_price),
-                    "market_value": str(p.market_value), "exit_plan": plans.get(t)}
+                t: {
+                    "qty": str(p.qty),
+                    "avg_cost": str(p.avg_cost),
+                    "market_price": str(p.market_price),
+                    "market_value": str(p.market_value),
+                    "exit_plan": plans.get(t),
+                }
                 for t, p in account.positions.items()
             },
             "risk_state": {

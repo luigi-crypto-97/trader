@@ -1,0 +1,409 @@
+"""Command line interface: ``uv run trader --help``."""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Annotated, Any
+
+import typer
+
+from trader.config import Settings
+from trader.domain import Quote, SignalStatus
+from trader.runtime import Runtime, build_runtime
+
+app = typer.Typer(
+    help="Trader: segnali SEC, rischio deterministico, approvazione umana.", no_args_is_help=True
+)
+signals_app = typer.Typer(help="Segnali: genera, elenca, approva.", no_args_is_help=True)
+ingest_app = typer.Typer(help="Acquisizione filing SEC EDGAR.", no_args_is_help=True)
+audit_app = typer.Typer(help="Registro di audit.", no_args_is_help=True)
+sim_app = typer.Typer(help="Strumenti per il broker simulato.", no_args_is_help=True)
+app.add_typer(signals_app, name="signals")
+app.add_typer(ingest_app, name="ingest")
+app.add_typer(audit_app, name="audit")
+app.add_typer(sim_app, name="sim")
+
+log = logging.getLogger("trader")
+
+
+def _setup_logging(verbose: bool = False) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+
+def _out(obj: Any) -> None:
+    typer.echo(json.dumps(obj, indent=2, default=str, ensure_ascii=False))
+
+
+def _rt() -> Runtime:
+    return build_runtime(Settings())
+
+
+# --------------------------------------------------------------------- status
+@app.command()
+def status() -> None:
+    """Stato del conto, posizioni, piani di uscita, kill switch."""
+    rt = _rt()
+    try:
+        _out(rt.system.status())
+    finally:
+        rt.close()
+
+
+@app.command()
+def doctor() -> None:
+    """Controlla configurazione e dipendenze senza inviare ordini."""
+    s = Settings()
+    checks: dict[str, Any] = {}
+    try:
+        limits = s.risk_limits()
+        checks["risk_config"] = f"ok ({s.risk_config_path}, restricted list: {len(limits.restricted)} ticker)"
+    except Exception as exc:
+        checks["risk_config"] = f"ERRORE: {exc}"
+    checks["db_url"] = s.db_url
+    checks["broker"] = (
+        s.broker if s.broker == "sim" else f"ibkr {s.ibkr_host}:{s.ibkr_port} (paper=4002/live=4001)"
+    )
+    checks["approval_mode"] = s.approval_mode
+    checks["sec_user_agent"] = "ok" if s.sec_user_agent else "MANCANTE: imposta TRADER_SEC_USER_AGENT"
+    checks["telegram"] = (
+        "ok" if s.telegram_bot_token and s.telegram_chat_id else "non configurato (approva da CLI)"
+    )
+    checks["llm"] = (
+        f"attivo ({s.llm_triage_model} -> {s.llm_analysis_model})" if s.llm_enabled else "disattivo"
+    )
+    if s.broker == "ibkr":
+        try:
+            rt = build_runtime(s)
+            acct = rt.broker.account()
+            checks["ibkr_connection"] = f"ok, equity {acct.equity} USD"
+            rt.close()
+        except Exception as exc:
+            checks["ibkr_connection"] = f"ERRORE: {exc}"
+    _out(checks)
+
+
+@app.command()
+def kill(
+    state: Annotated[str, typer.Argument(help="on | off")],
+    reason: Annotated[str, typer.Option(help="Motivo (registrato nell'audit)")] = "manual",
+) -> None:
+    """Attiva o disattiva il kill switch (blocca nuove entrate; le uscite restano consentite)."""
+    if state not in {"on", "off"}:
+        raise typer.BadParameter("usa 'on' oppure 'off'")
+    rt = _rt()
+    try:
+        rt.system.set_kill_switch(state == "on", reason=reason, actor="cli")
+        typer.echo(f"kill switch {state.upper()}")
+    finally:
+        rt.close()
+
+
+# -------------------------------------------------------------------- ingest
+@ingest_app.command("latest")
+def ingest_latest() -> None:
+    """Ultimi Form 4 e 8-K dal feed EDGAR (intraday)."""
+    _setup_logging()
+    rt = _rt()
+    try:
+        _out(rt.ingest(latest=True))
+    finally:
+        rt.close()
+
+
+@ingest_app.command("day")
+def ingest_day(day: Annotated[str, typer.Argument(help="YYYY-MM-DD")]) -> None:
+    """Tutti i Form 4 e 8-K di una giornata (indice master EDGAR)."""
+    _setup_logging()
+    rt = _rt()
+    try:
+        _out(rt.ingest(day=date.fromisoformat(day)))
+    finally:
+        rt.close()
+
+
+# ------------------------------------------------------------------- signals
+@signals_app.command("generate")
+def signals_generate(llm: Annotated[bool | None, typer.Option("--llm/--no-llm")] = None) -> None:
+    """Genera segnali (cluster insider; analisi LLM degli 8-K se abilitata) e li mette in coda."""
+    _setup_logging()
+    rt = _rt()
+    try:
+        results = rt.generate_signals(use_llm=llm)
+        _out(
+            [
+                {
+                    "ticker": s.ticker,
+                    "source": s.source,
+                    "conviction": str(s.conviction),
+                    "new": new,
+                    "id": s.id,
+                }
+                for s, new in results
+            ]
+        )
+    finally:
+        rt.close()
+
+
+@signals_app.command("list")
+def signals_list(
+    status: Annotated[str | None, typer.Option(help="es. PENDING_APPROVAL")] = None, limit: int = 20
+) -> None:
+    rt = _rt()
+    try:
+        st = SignalStatus(status.upper()) if status else None
+        _out(
+            [
+                {
+                    k: v
+                    for k, v in s.items()
+                    if k
+                    in {
+                        "id",
+                        "created_at",
+                        "ticker",
+                        "source",
+                        "status",
+                        "conviction",
+                        "status_reason",
+                        "expires_at",
+                    }
+                }
+                for s in rt.system.list_signals(st, limit)
+            ]
+        )
+    finally:
+        rt.close()
+
+
+@signals_app.command("show")
+def signals_show(signal_id: str) -> None:
+    rt = _rt()
+    try:
+        _out(rt.system.get_signal(signal_id) or {"error": "not found"})
+    finally:
+        rt.close()
+
+
+@app.command()
+def approve(signal_id: str, note: str = "") -> None:
+    """Approva un segnale in attesa (verrà rieseguito il controllo rischio prima dell'invio)."""
+    rt = _rt()
+    try:
+        ok, msg = rt.system.decide(signal_id, approve=True, actor="cli", note=note)
+        typer.echo(msg)
+        raise typer.Exit(0 if ok else 1)
+    finally:
+        rt.close()
+
+
+@app.command()
+def reject(signal_id: str, note: str = "") -> None:
+    rt = _rt()
+    try:
+        ok, msg = rt.system.decide(signal_id, approve=False, actor="cli", note=note)
+        typer.echo(msg)
+        raise typer.Exit(0 if ok else 1)
+    finally:
+        rt.close()
+
+
+# --------------------------------------------------------------------- cycle
+def _one_cycle(rt: Runtime, *, ingest: bool, generate: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if rt.telegram is not None:
+        out["telegram_updates"] = rt.telegram.process_updates(rt.system)
+    if ingest and rt.settings.sec_user_agent:
+        try:
+            out["daily_ingest"] = rt.ingest_previous_day_once()
+            out["ingest"] = {k: v for k, v in rt.ingest(latest=True).items() if k != "errors"}
+        except Exception as exc:
+            log.warning("ingest failed: %s", exc)
+            out["ingest_error"] = str(exc)
+    if generate:
+        out["new_signals"] = sum(1 for _, new in rt.generate_signals() if new)
+    out["cycle"] = rt.system.run_cycle().__dict__
+    rt.save()
+    return out
+
+
+@app.command()
+def cycle(ingest: bool = True, generate: bool = True) -> None:
+    """Un ciclo completo: Telegram, ingest, segnali, revisione, esecuzione, uscite."""
+    _setup_logging()
+    rt = _rt()
+    try:
+        _out(_one_cycle(rt, ingest=ingest, generate=generate))
+    finally:
+        rt.close()
+
+
+@app.command()
+def run(
+    interval: Annotated[int, typer.Option(help="Secondi tra un ciclo e l'altro")] = 300,
+    poll: Annotated[int, typer.Option(help="Secondi tra i controlli Telegram")] = 10,
+) -> None:
+    """Esecuzione continua. Ctrl+C per fermare (lo stato viene salvato)."""
+    _setup_logging()
+    rt = _rt()
+    typer.echo(f"Avvio: broker={rt.broker.name}, approvazione={rt.settings.approval_mode}, ciclo={interval}s")
+    next_cycle = 0.0
+    try:
+        while True:
+            now = time.monotonic()
+            try:
+                if now >= next_cycle:
+                    log.info("cycle: %s", json.dumps(_one_cycle(rt, ingest=True, generate=True), default=str))
+                    next_cycle = now + interval
+                elif rt.telegram is not None:
+                    rt.telegram.process_updates(rt.system)
+            except Exception:
+                log.exception("cycle failed; continuing")
+            time.sleep(poll)
+    except KeyboardInterrupt:
+        typer.echo("Arresto richiesto.")
+    finally:
+        rt.close()
+
+
+# --------------------------------------------------------------------- audit
+@audit_app.command("verify")
+def audit_verify() -> None:
+    rt = _rt()
+    try:
+        v = rt.audit.verify()
+        _out(v.__dict__)
+        raise typer.Exit(0 if v.ok else 2)
+    finally:
+        rt.close()
+
+
+@audit_app.command("tail")
+def audit_tail(n: int = 20) -> None:
+    rt = _rt()
+    try:
+        _out(rt.audit.tail(n))
+    finally:
+        rt.close()
+
+
+# ----------------------------------------------------------------------- tax
+@app.command()
+def tax(year: int) -> None:
+    """Bozza fiscale italiana (quadro RT, stima IVAFE) dai fill registrati."""
+    from sqlalchemy import select
+
+    from trader.data.fx import FxRates
+    from trader.db import FillRow
+    from trader.domain import Fill, Side
+    from trader.tax.ledger import ItalianTaxLedger
+
+    rt = _rt()
+    try:
+        fx = FxRates(rt.db)
+        with rt.db.session() as s:
+            fills = [
+                Fill(
+                    fill_id=f.fill_id,
+                    client_order_id=f.client_order_id,
+                    ticker=f.ticker,
+                    side=Side(f.side),
+                    qty=f.qty,
+                    price=f.price,
+                    commission=f.commission,
+                    ts=f.ts,
+                )
+                for f in s.scalars(select(FillRow))
+            ]
+        ledger = ItalianTaxLedger(fx=lambda d: fx.rate("USD", d))
+        ledger.process(f for f in fills if f.ts.year <= year)
+        year_end = date(year, 12, 31)
+        valuation_day = min(year_end, datetime.now(UTC).date())
+        account = rt.broker.account()
+        values = {t: p.market_value / fx.rate("USD", valuation_day) for t, p in account.positions.items()}
+        _out(
+            {
+                "avvertenza": "Bozza da verificare con il commercialista.",
+                "plusvalenze": ledger.capital_gains(year),
+                "ivafe_rw": ledger.ivafe_estimate(year, values),
+                "valori_fine_anno_al": valuation_day.isoformat(),
+            }
+        )
+    finally:
+        rt.close()
+
+
+# ---------------------------------------------------------------- backtest
+@app.command()
+def backtest(
+    prices: Annotated[Path, typer.Option(help="Cartella con <TICKER>.csv (date,open,high,low,close,volume)")],
+    start: str,
+    end: str,
+    cash: str = "1000",
+    benchmark: str = "SPY",
+) -> None:
+    """Backtest del segnale cluster insider sui dati già acquisiti, prezzi da CSV."""
+    from datetime import timedelta
+
+    from trader.backtest.engine import Backtester, load_csv_dir, replay_signals
+    from trader.signals.insider import find_insider_clusters
+
+    rt = _rt()
+    try:
+        s, e = date.fromisoformat(start), date.fromisoformat(end)
+        days = [
+            s + timedelta(days=i) for i in range((e - s).days + 1) if (s + timedelta(days=i)).weekday() < 5
+        ]
+        timed = replay_signals(lambda now: find_insider_clusters(rt.db, now), days)
+        bt = Backtester(
+            load_csv_dir(prices), limits=rt.limits, initial_cash=Decimal(cash), benchmark=benchmark
+        )
+        result = bt.run(timed, s, e)
+        _out(
+            {
+                "metrics": result.metrics(),
+                "signals": len(timed),
+                "trades": len(result.trades),
+                "rejected_sample": result.rejected[:20],
+            }
+        )
+    finally:
+        rt.close()
+
+
+# ----------------------------------------------------------------------- sim
+@sim_app.command("quote")
+def sim_quote(ticker: str, price: str, spread: str = "0.02", adv: str = "50000000") -> None:
+    """Imposta una quotazione nel broker simulato (solo per prove)."""
+    from trader.broker.simulated import SimulatedBroker
+
+    rt = _rt()
+    try:
+        if not isinstance(rt.broker, SimulatedBroker):
+            raise typer.BadParameter("disponibile solo con TRADER_BROKER=sim")
+        p, half = Decimal(price), Decimal(spread) / 2
+        rt.broker.set_quote(
+            Quote(
+                ticker=ticker.upper(),
+                ts=datetime.now(UTC),
+                bid=p - half,
+                ask=p + half,
+                last=p,
+                avg_daily_dollar_volume=Decimal(adv),
+            )
+        )
+        typer.echo(f"{ticker.upper()} {p - half}/{p + half}")
+    finally:
+        rt.close()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    app()

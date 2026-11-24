@@ -117,30 +117,67 @@ class EdgarIngestor:
                     raise SubmissionParseError("Form 4 without XML document")
                 own = parse_ownership_xml(xml)
                 ticker = tickers.get(own.issuer_cik) or own.ticker or None
-                s.add(FilingRow(accession=sub.accession, cik=own.issuer_cik, ticker=ticker,
-                                company=own.issuer_name, form="4", items="", filed_date=sub.filed_date,
-                                accepted_at=sub.accepted_at, ingested_at=now, url=url))
+                s.add(
+                    FilingRow(
+                        accession=sub.accession,
+                        cik=own.issuer_cik,
+                        ticker=ticker,
+                        company=own.issuer_name,
+                        form="4",
+                        items="",
+                        filed_date=sub.filed_date,
+                        accepted_at=sub.accepted_at,
+                        ingested_at=now,
+                        url=url,
+                    )
+                )
                 owner = own.primary_owner
                 for tx in own.transactions:
                     s.add(
                         InsiderTransactionRow(
-                            accession=sub.accession, seq=tx.seq, issuer_cik=own.issuer_cik, ticker=ticker,
-                            owner_cik=owner.cik, owner_name=owner.name, is_director=owner.is_director,
-                            is_officer=owner.is_officer, is_ten_pct_owner=owner.is_ten_pct_owner,
-                            officer_title=owner.officer_title, transaction_date=tx.transaction_date,
-                            code=tx.code, acquired_disposed=tx.acquired_disposed, shares=tx.shares,
-                            price=tx.price, shares_owned_after=tx.shares_owned_after, direct=tx.direct,
-                            is_10b5_1=own.is_10b5_1, accepted_at=sub.accepted_at, ingested_at=now,
+                            accession=sub.accession,
+                            seq=tx.seq,
+                            issuer_cik=own.issuer_cik,
+                            ticker=ticker,
+                            owner_cik=owner.cik,
+                            owner_name=owner.name,
+                            is_director=owner.is_director,
+                            is_officer=owner.is_officer,
+                            is_ten_pct_owner=owner.is_ten_pct_owner,
+                            officer_title=owner.officer_title,
+                            transaction_date=tx.transaction_date,
+                            code=tx.code,
+                            acquired_disposed=tx.acquired_disposed,
+                            shares=tx.shares,
+                            price=tx.price,
+                            shares_owned_after=tx.shares_owned_after,
+                            direct=tx.direct,
+                            is_10b5_1=own.is_10b5_1,
+                            accepted_at=sub.accepted_at,
+                            ingested_at=now,
                         )
                     )
                     insider_rows += 1
             elif sub.form == "8-K":
                 cik = next((c for c in sub.ciks if c in tickers), entry.cik)
                 docs = [sub.first("8-K"), *sub.by_prefix("EX-99")]
-                parts = [f"=== {d.type} ({d.filename}) ===\n{html_to_text(d.text)}" for d in docs if d is not None]
-                s.add(FilingRow(accession=sub.accession, cik=cik, ticker=tickers.get(cik),
-                                company=entry.company, form="8-K", items=" | ".join(sub.items),
-                                filed_date=sub.filed_date, accepted_at=sub.accepted_at, ingested_at=now, url=url))
+                parts = [
+                    f"=== {d.type} ({d.filename}) ===\n{html_to_text(d.text)}" for d in docs if d is not None
+                ]
+                s.add(
+                    FilingRow(
+                        accession=sub.accession,
+                        cik=cik,
+                        ticker=tickers.get(cik),
+                        company=entry.company,
+                        form="8-K",
+                        items=" | ".join(sub.items),
+                        filed_date=sub.filed_date,
+                        accepted_at=sub.accepted_at,
+                        ingested_at=now,
+                        url=url,
+                    )
+                )
                 s.add(FilingTextRow(accession=sub.accession, text="\n\n".join(parts)))
             else:
                 raise SubmissionParseError(f"unsupported form {sub.form}")

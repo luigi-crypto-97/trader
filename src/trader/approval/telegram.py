@@ -1,0 +1,180 @@
+"""Telegram bot: approval requests with inline buttons, fill/exit notifications, kill switch.
+
+Security model:
+* Only updates from the configured private chat are honoured; everything else is ignored.
+* From Telegram you can approve/reject pending signals and turn the kill switch ON.
+  Turning it OFF is deliberately only possible from the CLI (asymmetric: stopping is easy,
+  resuming requires being at the machine).
+* The bot token is a secret: it is never logged or echoed.
+"""
+
+from __future__ import annotations
+
+import logging
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any
+
+import httpx
+
+from trader.db import Database
+from trader.domain import SignalStatus
+
+if TYPE_CHECKING:
+    from trader.pipeline import TradingSystem
+
+log = logging.getLogger(__name__)
+
+OFFSET_KEY = "telegram_update_offset"
+API = "https://api.telegram.org"
+
+
+class TelegramError(RuntimeError):
+    pass
+
+
+def format_pending(signal: dict[str, Any]) -> str:
+    entry = signal.get("plan", {}).get("entry", {})
+    qty = entry.get("qty", "?")
+    limit = entry.get("limit_price", "?")
+    stop = entry.get("stop_price", "?")
+    stop_pct = Decimal(entry.get("stop_loss_pct", "0")) * 100
+    notional = Decimal(entry.get("notional", "0")).quantize(Decimal("0.01"))
+    thesis = str(signal.get("thesis", ""))
+    if len(thesis) > 1200:
+        thesis = thesis[:1200] + " [...]"
+    links: list[str] = [
+        str(e["url"]) for e in signal.get("evidence", []) if isinstance(e, dict) and e.get("url")
+    ]
+    lines = [
+        "NUOVO SEGNALE DA APPROVARE",
+        f"{signal['ticker']} - BUY {qty} az. limite {limit} USD (~{notional} USD)",
+        f"Stop {stop} (-{stop_pct:.1f}%) | orizzonte {signal['horizon_days']} gg | "
+        f"convinzione {signal['conviction']}",
+        f"Fonte: {signal['source']}",
+        f"Tesi: {thesis}",
+    ]
+    if links:
+        lines.append("Fonti: " + " ".join(dict.fromkeys(links[:3])))
+    lines += [f"Scade: {signal.get('expires_at')}", f"ID: {signal['id']}"]
+    return "\n".join(lines)
+
+
+class TelegramBot:
+    def __init__(self, token: str, chat_id: int, db: Database, http: httpx.Client | None = None) -> None:
+        if not token:
+            raise TelegramError("missing bot token")
+        self._token = token
+        self.chat_id = chat_id
+        self.db = db
+        self.http = http or httpx.Client(timeout=20.0)
+
+    def _api(self, method: str, **params: Any) -> Any:
+        try:
+            resp = self.http.post(f"{API}/bot{self._token}/{method}", json=params)
+        except httpx.HTTPError as exc:
+            raise TelegramError(f"{method}: network error {type(exc).__name__}") from None
+        try:
+            data = resp.json()
+        except ValueError:
+            raise TelegramError(f"{method}: HTTP {resp.status_code}") from None
+        if not data.get("ok"):
+            raise TelegramError(f"{method}: {data.get('description', 'error')}")
+        return data.get("result")
+
+    # ------------------------------------------------------------ Notifier
+    def notify(self, text: str) -> None:
+        self._api("sendMessage", chat_id=self.chat_id, text=text[:4000])
+
+    def notify_pending(self, signal: dict[str, Any]) -> None:
+        sid = signal["id"]
+        self._api(
+            "sendMessage",
+            chat_id=self.chat_id,
+            text=format_pending(signal)[:4000],
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "Approva", "callback_data": f"ap:{sid}"},
+                        {"text": "Rifiuta", "callback_data": f"rj:{sid}"},
+                    ]
+                ]
+            },
+        )
+
+    # -------------------------------------------------------------- inbound
+    def process_updates(self, system: TradingSystem) -> int:
+        """Poll once (non-blocking) and handle button presses and commands. Returns handled count."""
+        offset = int(self.db.kv_get(OFFSET_KEY, 0))
+        updates = (
+            self._api("getUpdates", offset=offset, timeout=0, allowed_updates=["callback_query", "message"])
+            or []
+        )
+        handled = 0
+        for upd in updates:
+            offset = max(offset, int(upd["update_id"]) + 1)
+            try:
+                if "callback_query" in upd:
+                    handled += self._on_callback(upd["callback_query"], system)
+                elif "message" in upd:
+                    handled += self._on_message(upd["message"], system)
+            except TelegramError as exc:
+                log.warning("telegram handling failed: %s", exc)
+        self.db.kv_set(OFFSET_KEY, offset)
+        return handled
+
+    def _authorized(self, chat: dict[str, Any] | None) -> bool:
+        return chat is not None and int(chat.get("id", 0)) == self.chat_id
+
+    def _on_callback(self, cq: dict[str, Any], system: TradingSystem) -> int:
+        message = cq.get("message") or {}
+        if not self._authorized(message.get("chat")):
+            self._api("answerCallbackQuery", callback_query_id=cq["id"], text="Non autorizzato")
+            return 0
+        data = str(cq.get("data", ""))
+        action, _, sid = data.partition(":")
+        if action not in {"ap", "rj"} or not sid:
+            return 0
+        user = cq.get("from", {})
+        actor = f"telegram:{user.get('id')}:{user.get('username', '')}"
+        ok, msg = system.decide(sid, approve=(action == "ap"), actor=actor)
+        verdict = ("APPROVATO" if action == "ap" else "RIFIUTATO") if ok else f"NON APPLICATO ({msg})"
+        self._api("answerCallbackQuery", callback_query_id=cq["id"], text=verdict[:190])
+        if "message_id" in message:
+            self._api(
+                "editMessageReplyMarkup",
+                chat_id=self.chat_id,
+                message_id=message["message_id"],
+                reply_markup={"inline_keyboard": []},
+            )
+        self.notify(f"Segnale {sid[:8]}: {verdict}")
+        return 1
+
+    def _on_message(self, msg: dict[str, Any], system: TradingSystem) -> int:
+        if not self._authorized(msg.get("chat")):
+            return 0
+        text = str(msg.get("text", "")).strip().lower()
+        if text in {"/kill", "/stop"}:
+            system.set_kill_switch(True, reason="telegram command", actor=f"telegram:{msg['chat']['id']}")
+            return 1
+        if text == "/status":
+            st = system.status()
+            pos = ", ".join(f"{t} {p['qty']}" for t, p in st["positions"].items()) or "nessuna"
+            self.notify(
+                f"Equity {st['equity']} USD | cash {st['settled_cash']} | posizioni: {pos} | "
+                f"kill switch: {'ON' if st['kill_switch'].get('on') else 'off'}"
+            )
+            return 1
+        if text == "/pending":
+            pending = system.list_signals(SignalStatus.PENDING_APPROVAL)
+            if not pending:
+                self.notify("Nessun segnale in attesa.")
+            for s in pending:
+                self.notify_pending(s)
+            return 1
+        if text in {"/help", "/start"}:
+            self.notify(
+                "Comandi: /status, /pending, /kill (attiva il kill switch). "
+                "La disattivazione del kill switch si fa solo da CLI."
+            )
+            return 1
+        return 0

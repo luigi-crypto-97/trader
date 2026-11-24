@@ -233,7 +233,9 @@ class SimulatedBroker:
     def from_state(cls, state: dict[str, Any], **kwargs: Any) -> SimulatedBroker:
         broker = cls(settled_cash=Decimal(state["settled_cash"]), **kwargs)
         broker.pending = [(date.fromisoformat(d), Decimal(a)) for d, a in state.get("pending", [])]
-        broker.holdings = {t: _Holding(Decimal(q), Decimal(c)) for t, (q, c) in state.get("holdings", {}).items()}
+        broker.holdings = {
+            t: _Holding(Decimal(q), Decimal(c)) for t, (q, c) in state.get("holdings", {}).items()
+        }
         broker.orders = {
             k: _Order(OrderRequest.model_validate(v["request"]), OrderResult.model_validate(v["result"]))
             for k, v in state.get("orders", {}).items()

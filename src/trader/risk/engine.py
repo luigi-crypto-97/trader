@@ -208,7 +208,9 @@ class RiskEngine:
             gross_pct = (account.gross_exposure + notional) / equity
             c.add("max_gross_exposure", gross_pct <= lim.max_gross_exposure_pct, f"gross {_pct(gross_pct)}")
             opened = len(account.positions) + (0 if existing else 1)
-            c.add("max_positions", opened <= lim.max_positions, f"{opened} positions (max {lim.max_positions})")
+            c.add(
+                "max_positions", opened <= lim.max_positions, f"{opened} positions (max {lim.max_positions})"
+            )
 
         adv = quote.avg_daily_dollar_volume
         if adv is None or adv <= 0:
@@ -216,7 +218,9 @@ class RiskEngine:
         else:
             c.add("liquidity_adv", notional / adv <= lim.max_adv_pct, f"{_pct(notional / adv)} of ADV")
 
-        return RiskDecision(approved=all(x.passed for x in c.checks), checks=tuple(c.checks), trip_kill_switch=trip)
+        return RiskDecision(
+            approved=all(x.passed for x in c.checks), checks=tuple(c.checks), trip_kill_switch=trip
+        )
 
     def _fresh_ref(self, quote: Quote | None, now: datetime) -> Decimal | None:
         if quote is None:

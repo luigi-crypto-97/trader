@@ -91,8 +91,15 @@ class ItalianTaxLedger:
         proceeds_usd = f.qty * f.price - f.commission
         proceeds_eur = proceeds_usd / rate
         self.events.append(
-            RealizedEvent(day=day, ticker=f.ticker, qty=f.qty, proceeds_usd=proceeds_usd, fx_rate=rate,
-                          proceeds_eur=proceeds_eur, cost_eur=cost)
+            RealizedEvent(
+                day=day,
+                ticker=f.ticker,
+                qty=f.qty,
+                proceeds_usd=proceeds_usd,
+                fx_rate=rate,
+                proceeds_eur=proceeds_eur,
+                cost_eur=cost,
+            )
         )
         h.qty -= f.qty
         h.cost_eur -= cost
@@ -117,9 +124,15 @@ class ItalianTaxLedger:
             "imposta_sostitutiva_stimata_eur": str(eur(max(net, Decimal("0")) * CAPITAL_GAINS_RATE)),
             "minusvalenze_riportabili_eur": str(eur(max(-net, Decimal("0")))),
             "detail": [
-                {"date": e.day.isoformat(), "ticker": e.ticker, "qty": str(e.qty),
-                 "fx_usd_per_eur": str(e.fx_rate), "proceeds_eur": str(eur(e.proceeds_eur)),
-                 "cost_eur": str(eur(e.cost_eur)), "gain_eur": str(eur(e.gain_eur))}
+                {
+                    "date": e.day.isoformat(),
+                    "ticker": e.ticker,
+                    "qty": str(e.qty),
+                    "fx_usd_per_eur": str(e.fx_rate),
+                    "proceeds_eur": str(eur(e.proceeds_eur)),
+                    "cost_eur": str(eur(e.cost_eur)),
+                    "gain_eur": str(eur(e.gain_eur)),
+                }
                 for e in evs
             ],
         }
@@ -148,6 +161,14 @@ class ItalianTaxLedger:
                 value = year_end_values_eur[p.ticker]
             tax = value * IVAFE_RATE * days / days_in_year
             total += tax
-            rows.append({"ticker": p.ticker, "from": first.isoformat(), "to": last.isoformat(), "days": days,
-                         "value_eur": str(eur(value)), "ivafe_eur": str(eur(tax))})
+            rows.append(
+                {
+                    "ticker": p.ticker,
+                    "from": first.isoformat(),
+                    "to": last.isoformat(),
+                    "days": days,
+                    "value_eur": str(eur(value)),
+                    "ivafe_eur": str(eur(tax)),
+                }
+            )
         return {"year": year, "ivafe_stimata_eur": str(eur(total)), "periodi_rw": rows}

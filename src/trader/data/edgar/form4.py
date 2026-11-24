@@ -40,7 +40,9 @@ class InsiderTransaction:
 
     @property
     def is_open_market_purchase(self) -> bool:
-        return self.code == "P" and self.acquired_disposed == "A" and self.price is not None and self.price > 0
+        return (
+            self.code == "P" and self.acquired_disposed == "A" and self.price is not None and self.price > 0
+        )
 
 
 @dataclass(frozen=True)

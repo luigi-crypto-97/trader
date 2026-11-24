@@ -101,8 +101,9 @@ def test_master_index_and_atom() -> None:
 
 
 def mock_client(handler: httpx.MockTransport, **kw: object) -> EdgarClient:
-    return EdgarClient("test-suite research", http=httpx.Client(transport=handler), max_rps=10,
-                       sleep=lambda _s: None, **kw)  # type: ignore[arg-type]
+    return EdgarClient(
+        "test-suite research", http=httpx.Client(transport=handler), max_rps=10, sleep=lambda _s: None, **kw
+    )  # type: ignore[arg-type]
 
 
 def test_client_requires_user_agent_and_sane_rate() -> None:

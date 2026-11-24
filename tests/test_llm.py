@@ -34,17 +34,32 @@ class FakeCaller:
 
 
 def filing(ticker: str | None = "ACME", accession: str = "0000000001-26-000001") -> FilingRow:
-    return FilingRow(accession=accession, cik=1, ticker=ticker, company="ACME Corp", form="8-K",
-                     items="Other Events", filed_date=date(2026, 11, 24), accepted_at=NOW, ingested_at=NOW,
-                     url="https://www.sec.gov/x", analyzed=False)
+    return FilingRow(
+        accession=accession,
+        cik=1,
+        ticker=ticker,
+        company="ACME Corp",
+        form="8-K",
+        items="Other Events",
+        filed_date=date(2026, 11, 24),
+        accepted_at=NOW,
+        ingested_at=NOW,
+        url="https://www.sec.gov/x",
+        analyzed=False,
+    )
 
 
 BUY = {
-    "action": "BUY", "horizon_days": 20, "conviction": 0.72, "stop_loss_pct": 0.09,
+    "action": "BUY",
+    "horizon_days": 20,
+    "conviction": 0.72,
+    "stop_loss_pct": 0.09,
     "thesis": "Contratto pluriennale pari a ~79% del fatturato annuo.",
     "key_risks": ["Esecuzione del contratto"],
-    "evidence_quotes": ["awarded a five-year contract valued at approximately $480 million",
-                        "Revenue for fiscal 2025 was $610 million"],
+    "evidence_quotes": [
+        "awarded a five-year contract valued at approximately $480 million",
+        "Revenue for fiscal 2025 was $610 million",
+    ],
 }
 RELEVANT = {"relevant": True, "event_type": "contract_win", "summary": "large DOE contract"}
 
@@ -102,8 +117,9 @@ def test_analyze_recent_marks_filings(tmp_path: Path) -> None:
         s.add(FilingTextRow(accession="0000000001-26-000001", text=TEXT))
         s.add(filing(ticker=None, accession="0000000002-26-000002"))
     outcomes: list[str] = []
-    sigs = analyze_recent_8k(db, FilingAnalyzer(FakeCaller(RELEVANT, BUY)), NOW,
-                             on_outcome=lambda o: outcomes.append(o.stage))
+    sigs = analyze_recent_8k(
+        db, FilingAnalyzer(FakeCaller(RELEVANT, BUY)), NOW, on_outcome=lambda o: outcomes.append(o.stage)
+    )
     assert [s.ticker for s in sigs] == ["ACME"] and outcomes == ["done"]
     assert analyze_recent_8k(db, FilingAnalyzer(FakeCaller(RELEVANT, BUY)), NOW) == []
 
@@ -123,7 +139,8 @@ class FakeMessages:
 
 def fake_client(text: str, stop: str = "end_turn") -> SimpleNamespace:
     resp = SimpleNamespace(
-        stop_reason=stop, stop_details=SimpleNamespace(category="cyber"),
+        stop_reason=stop,
+        stop_details=SimpleNamespace(category="cyber"),
         content=[SimpleNamespace(type="thinking", thinking=""), SimpleNamespace(type="text", text=text)],
         usage=SimpleNamespace(input_tokens=100, output_tokens=20),
     )
@@ -133,13 +150,21 @@ def fake_client(text: str, stop: str = "end_turn") -> SimpleNamespace:
 def test_anthropic_caller_uses_fallbacks_for_opus_and_plain_for_haiku() -> None:
     client = fake_client('{"relevant": true}')
     caller = AnthropicJsonCaller(client)
-    data, usage = caller(model="claude-opus-5-5", system="s", user="u", schema={"type": "object"},
-                         max_tokens=100, effort="high")
+    data, usage = caller(
+        model="claude-opus-5-5",
+        system="s",
+        user="u",
+        schema={"type": "object"},
+        max_tokens=100,
+        effort="high",
+    )
     assert data == {"relevant": True} and usage == {"input_tokens": 100, "output_tokens": 20}
     sent = client.beta.messages.kwargs
     assert sent["fallbacks"] == "default" and sent["betas"] == ["server-side-fallback-2026-07-01"]
-    assert sent["output_config"] == {"format": {"type": "json_schema", "schema": {"type": "object"}},
-                                     "effort": "high"}
+    assert sent["output_config"] == {
+        "format": {"type": "json_schema", "schema": {"type": "object"}},
+        "effort": "high",
+    }
     caller(model="claude-haiku-5-5", system="s", user="u", schema={}, max_tokens=100, effort="low")
     assert "fallbacks" not in client.messages.kwargs
 

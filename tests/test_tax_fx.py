@@ -21,8 +21,16 @@ CSV = (
 
 
 def fill(fid: str, side: Side, qty: str, price: str, comm: str, day: int) -> Fill:
-    return Fill(fill_id=fid, client_order_id="c", ticker="ACME", side=side, qty=D(qty), price=D(price),
-                commission=D(comm), ts=datetime(2026, 3, day, 15, tzinfo=UTC))
+    return Fill(
+        fill_id=fid,
+        client_order_id="c",
+        ticker="ACME",
+        side=side,
+        qty=D(qty),
+        price=D(price),
+        commission=D(comm),
+        ts=datetime(2026, 3, day, 15, tzinfo=UTC),
+    )
 
 
 FX = {date(2026, 3, 2): D("1.10"), date(2026, 3, 3): D("1.00"), date(2026, 3, 4): D("1.25")}
@@ -30,12 +38,14 @@ FX = {date(2026, 3, 2): D("1.10"), date(2026, 3, 3): D("1.00"), date(2026, 3, 4)
 
 def test_weighted_average_cost_in_eur_with_daily_fx() -> None:
     ledger = ItalianTaxLedger(fx=lambda d: FX[d])
-    ledger.process([
-        fill("1", Side.BUY, "10", "11", "1", 2),
-        fill("2", Side.BUY, "10", "10", "1", 3),
-        fill("3", Side.SELL, "5", "12.5", "1", 4),
-        fill("4", Side.SELL, "15", "12.5", "1", 4),
-    ])
+    ledger.process(
+        [
+            fill("1", Side.BUY, "10", "11", "1", 2),
+            fill("2", Side.BUY, "10", "10", "1", 3),
+            fill("3", Side.SELL, "5", "12.5", "1", 4),
+            fill("4", Side.SELL, "15", "12.5", "1", 4),
+        ]
+    )
     e1, e2 = ledger.events
     assert e1.proceeds_eur == D("49.2")
     assert round(e1.cost_eur, 6) == D("50.477273")
@@ -65,11 +75,13 @@ def test_oversell_rejected() -> None:
 
 def test_ivafe_estimate_pro_rata() -> None:
     ledger = ItalianTaxLedger(fx=lambda d: D("1"))
-    ledger.process([
-        fill("1", Side.BUY, "10", "100", "0", 2),
-        fill("2", Side.SELL, "10", "100", "0", 4),  # closed: value 1000, 3 days
-        fill("3", Side.BUY, "1", "100", "0", 4),     # open at year end
-    ])
+    ledger.process(
+        [
+            fill("1", Side.BUY, "10", "100", "0", 2),
+            fill("2", Side.SELL, "10", "100", "0", 4),  # closed: value 1000, 3 days
+            fill("3", Side.BUY, "1", "100", "0", 4),  # open at year end
+        ]
+    )
     with pytest.raises(ValueError):
         ledger.ivafe_estimate(2026, {})
     out = ledger.ivafe_estimate(2026, {"ACME": D("365")})
@@ -92,8 +104,10 @@ def ecb_transport(calls: list[str]) -> httpx.MockTransport:
 
 def test_fx_previous_business_day_and_cache(tmp_path: Path) -> None:
     calls: list[str] = []
-    fx = FxRates(Database(f"sqlite:///{tmp_path / 'fx.sqlite'}"),
-                 EcbClient(httpx.Client(transport=ecb_transport(calls))))
+    fx = FxRates(
+        Database(f"sqlite:///{tmp_path / 'fx.sqlite'}"),
+        EcbClient(httpx.Client(transport=ecb_transport(calls))),
+    )
     assert fx.rate("USD", date(2026, 11, 23)) == D("1.0939")
     assert fx.rate("USD", date(2026, 11, 22)) == D("1.099")  # Sunday -> Friday
     assert fx.rate("USD", date(2026, 11, 21)) == D("1.099")  # Saturday -> Friday

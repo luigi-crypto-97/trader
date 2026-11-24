@@ -174,9 +174,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _auto_needs_explicit_opt_in(self) -> Settings:
         if self.approval_mode == "auto" and not self.allow_auto_execution:
-            raise ValueError(
-                "approval_mode=auto requires TRADER_ALLOW_AUTO_EXECUTION=true (explicit opt-in)"
-            )
+            raise ValueError("approval_mode=auto requires TRADER_ALLOW_AUTO_EXECUTION=true (explicit opt-in)")
         return self
 
     def risk_limits(self) -> RiskLimits:

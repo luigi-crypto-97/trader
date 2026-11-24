@@ -60,10 +60,20 @@ def test_plan_entry_respects_every_cap(limits, make_quote, make_account) -> None
 
 
 def test_plan_entry_risk_budget_scales_with_conviction(limits, make_quote, make_account) -> None:  # type: ignore[no-untyped-def]
-    wide_stop_low = plan_entry(signal(conviction=D("0.5"), stop_loss_pct=D("0.2")), make_quote(),
-                               make_account(cash="100000"), limits, IbkrTieredUS())
-    wide_stop_high = plan_entry(signal(conviction=D("1"), stop_loss_pct=D("0.2")), make_quote(),
-                                make_account(cash="100000"), limits, IbkrTieredUS())
+    wide_stop_low = plan_entry(
+        signal(conviction=D("0.5"), stop_loss_pct=D("0.2")),
+        make_quote(),
+        make_account(cash="100000"),
+        limits,
+        IbkrTieredUS(),
+    )
+    wide_stop_high = plan_entry(
+        signal(conviction=D("1"), stop_loss_pct=D("0.2")),
+        make_quote(),
+        make_account(cash="100000"),
+        limits,
+        IbkrTieredUS(),
+    )
     assert isinstance(wide_stop_low, EntryPlan) and isinstance(wide_stop_high, EntryPlan)
     assert wide_stop_low.binding_constraint == "risk_budget"
     assert wide_stop_high.risk_amount > wide_stop_low.risk_amount
@@ -147,7 +157,9 @@ def test_market_data_checks(limits, make_quote, make_account, now, quote_kwargs,
     shift = quote_kwargs.pop("ts_shift", 0)
     q = make_quote(ts=now - timedelta(seconds=shift), **quote_kwargs)
     price = str(q.ask) if q.ask else "50.15"
-    d = engine(limits).evaluate(buy(qty="1", limit=price), quote=q, account=make_account(), state=CLEAN, now=now)
+    d = engine(limits).evaluate(
+        buy(qty="1", limit=price), quote=q, account=make_account(), state=CLEAN, now=now
+    )
     assert not d.approved
     assert expected in failed(d)
 
@@ -158,8 +170,9 @@ def test_missing_quote_rejected(limits, make_account, now) -> None:  # type: ign
 
 
 def test_fat_finger_price(limits, make_quote, make_account, now) -> None:  # type: ignore[no-untyped-def]
-    d = engine(limits).evaluate(buy(qty="1", limit="60"), quote=make_quote(), account=make_account(),
-                                state=CLEAN, now=now)
+    d = engine(limits).evaluate(
+        buy(qty="1", limit="60"), quote=make_quote(), account=make_account(), state=CLEAN, now=now
+    )
     assert "price_deviation" in failed(d)
 
 
@@ -168,12 +181,19 @@ def test_position_cash_and_count_caps(limits, make_quote, make_account, now) -> 
     too_big = eng.evaluate(buy(qty="3"), quote=make_quote(), account=make_account(), state=CLEAN, now=now)
     assert "max_position" in failed(too_big)
 
-    no_cash = eng.evaluate(buy(qty="1"), quote=make_quote(), account=make_account(cash="40"), state=CLEAN, now=now)
+    no_cash = eng.evaluate(
+        buy(qty="1"), quote=make_quote(), account=make_account(cash="40"), state=CLEAN, now=now
+    )
     assert "settled_cash" in failed(no_cash)
 
     full = {f"T{i}": ("1", "10") for i in range(10)}
-    crowded = eng.evaluate(buy(qty="1"), quote=make_quote(), account=make_account(cash="1000", positions=full),
-                           state=CLEAN, now=now)
+    crowded = eng.evaluate(
+        buy(qty="1"),
+        quote=make_quote(),
+        account=make_account(cash="1000", positions=full),
+        state=CLEAN,
+        now=now,
+    )
     assert "max_positions" in failed(crowded)
 
 
@@ -181,13 +201,16 @@ def test_market_orders_and_bad_steps_rejected_for_entries(limits, make_quote, ma
     mkt = OrderRequest(ticker="ACME", side=Side.BUY, qty=D("1"), order_type=OrderType.MARKET)
     d = engine(limits).evaluate(mkt, quote=make_quote(), account=make_account(), state=CLEAN, now=now)
     assert "limit_order_only" in failed(d)
-    odd = engine(limits).evaluate(buy(qty="1.00005"), quote=make_quote(), account=make_account(),
-                                  state=CLEAN, now=now)
+    odd = engine(limits).evaluate(
+        buy(qty="1.00005"), quote=make_quote(), account=make_account(), state=CLEAN, now=now
+    )
     assert "qty_step" in failed(odd)
 
 
 def test_tiny_order_blocked_by_commission_and_min_value(limits, make_quote, make_account, now) -> None:  # type: ignore[no-untyped-def]
-    d = engine(limits).evaluate(buy(qty="0.1"), quote=make_quote(), account=make_account(), state=CLEAN, now=now)
+    d = engine(limits).evaluate(
+        buy(qty="0.1"), quote=make_quote(), account=make_account(), state=CLEAN, now=now
+    )
     assert {"min_order_value"} <= failed(d)
 
 
