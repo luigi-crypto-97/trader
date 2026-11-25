@@ -354,3 +354,17 @@ def test_unknown_model_is_a_configuration_error(tmp_path: Path) -> None:
         analyze_recent_8k(db, FilingAnalyzer(Raising(err)), NOW)
     with db.session() as s:
         assert not s.get(FilingRow, "0000000001-26-000001").analyzed  # type: ignore[union-attr]
+
+
+def test_filing_never_fitting_budget_is_given_up(tmp_path: Path) -> None:
+    from trader.signals.llm import MAX_CAPPED_TIMEOUTS
+
+    db = Database(f"sqlite:///{tmp_path / 'cap.sqlite'}")
+    with db.session() as s:
+        s.add(filing())
+        s.add(FilingTextRow(accession="0000000001-26-000001", text=TEXT))
+    for _ in range(MAX_CAPPED_TIMEOUTS):
+        caller = Clocked(cost=1, fail=TimeoutError("read timeout"))
+        analyze_recent_8k(db, FilingAnalyzer(caller), NOW, budget_seconds=60, monotonic=caller.clock)
+    with db.session() as s:
+        assert s.get(FilingRow, "0000000001-26-000001").analyzed  # type: ignore[union-attr]

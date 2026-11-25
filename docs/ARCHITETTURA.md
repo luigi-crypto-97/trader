@@ -89,7 +89,21 @@ MCP con una restricted list attiva.
 
 ### Tempi del ciclo
 
-Ordine: comandi Telegram (al massimo 30 s, `/kill` sempre per primo) → ciclo di trading
-(sincronizzazione, stop-loss e uscite a scadenza, ordini approvati) → acquisizione EDGAR e analisi
-LLM, che si fermano 10 s prima del ciclo successivo. Ogni richiesta HTTP ha un timeout limitato al
-tempo rimasto; il lavoro non completato riprende al ciclo dopo. Intervallo minimo: 60 s.
+Ordine: comandi Telegram → ciclo di trading (sincronizzazione, stop-loss e uscite a scadenza,
+ordini approvati) → acquisizione EDGAR e analisi LLM.
+
+| Fase | Limite |
+|---|---|
+| `/kill` | applicato per primo, prima di ogni altro comando e di ogni scadenza |
+| Comandi Telegram prima del trading | 30 s, più al massimo un comando già avviato (chiamate Telegram da 5 s; dopo la scadenza si invia solo l'esito) |
+| Inizio della fase di trading | entro circa 45-50 s dall'inizio del ciclo |
+| Acquisizione EDGAR e LLM | si fermano 10 s prima del ciclo successivo; il lavoro rimasto riprende al ciclo dopo |
+| Controlli Telegram tra un ciclo e l'altro | solo se mancano almeno 20 s al ciclo successivo; la pausa non supera mai l'ora del ciclo |
+
+Intervallo minimo: 60 s. I timeout HTTP valgono per fase di rete (connessione, lettura), non per
+l'intera risposta: un trasferimento molto lento può sforare di qualche secondo. Restano fuori da
+questi limiti l'I/O del broker durante il ciclo di trading e la risoluzione DNS.
+
+Nota operativa: un `/kill` arrivato a scadenza già passata viene riapplicato al controllo
+successivo finché Telegram non lo conferma; se nel frattempo il kill switch è stato spento da CLI,
+si riaccende (scelta prudente: spegnilo di nuovo dopo qualche secondo).

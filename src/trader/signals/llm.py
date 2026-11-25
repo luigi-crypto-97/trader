@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 SOURCE = "llm_8k"
 CALL_TIMEOUT = 120.0  # seconds, per API call
 MIN_CALL_SECONDS = 20.0  # do not start a call with less time than this left in the budget
+MAX_CAPPED_TIMEOUTS = 6  # budget-cut timeouts after which a filing is given up
 TRIAGE_CHARS = 20_000
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
@@ -451,7 +452,19 @@ def analyze_recent_8k(
             except Exception as exc:
                 kind = classify_error(exc)
                 if kind == "timeout" and analyzer.last_call_capped:
-                    kind = "budget"  # cut short by our own budget: not the filing's fault
+                    # Cut short by our own budget: not counted as a normal attempt, but a filing that
+                    # never fits the budget is still given up after MAX_CAPPED_TIMEOUTS cycles.
+                    capped_key = f"llm_capped:{f.accession}"
+                    capped = int(db.kv_get(capped_key, 0)) + 1
+                    db.kv_set(capped_key, capped)
+                    if capped >= MAX_CAPPED_TIMEOUTS:
+                        with db.session() as s:
+                            row = s.get(FilingRow, f.accession)
+                            if row is not None:
+                                row.analyzed = True
+                        db.kv_delete(capped_key)
+                        log.warning("filing %s never fits the LLM time budget: given up", f.accession)
+                    kind = "budget"
                 if kind in {"budget", "outage", "config"}:
                     level = logging.ERROR if kind == "config" else logging.INFO
                     log.log(level, "LLM batch stopped (%s): %s", kind, exc)
@@ -465,6 +478,8 @@ def analyze_recent_8k(
                     on_outcome(outcome)
                 except Exception as exc:
                     log.warning("could not record LLM outcome for %s: %s", f.accession, exc)
+                    if stop:
+                        break
                     continue  # not marked: analysed again later; ideas already collected are kept
             if outcome.stage == "error":
                 attempts = int(db.kv_get(attempts_key, 0)) + 1

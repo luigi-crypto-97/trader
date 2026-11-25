@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 from tests.conftest import NOW
 from tests.test_pipeline import Clock, make_signal, quote
@@ -217,3 +218,27 @@ def test_group_member_cannot_command(tmp_path: Path) -> None:
     bot.process_updates(system)
     assert not system.kill_switch_on()
     assert system.get_signal(sig.id)["status"] == "PENDING_APPROVAL"  # type: ignore[index]
+
+
+def test_command_handling_ends_within_declared_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import trader.approval.telegram as tg_mod
+
+    system, bot, fake = setup(tmp_path)
+    sig = make_signal()
+    system.submit_signal(sig)
+    system.run_cycle()
+    clock = [0.0]
+    monkeypatch.setattr(tg_mod.time, "monotonic", lambda: clock[0])
+    original = fake.handler
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        clock[0] += tg_mod.CALL_TIMEOUT  # every Telegram call takes its full timeout
+        return original(request)
+
+    bot.http = httpx.Client(transport=httpx.MockTransport(slow))
+    fake.updates = [callback(60, f"ap:{sig.id}", chat=CHAT), callback(61, "rj:other", chat=CHAT)]
+    deadline = 7.0
+    bot.process_updates(system, deadline=deadline)
+    # getUpdates + in-flight callback: one cosmetic call started before the deadline + the verdict
+    assert clock[0] <= deadline + 2 * tg_mod.CALL_TIMEOUT
+    assert system.get_signal(sig.id)["status"] == "APPROVED"  # type: ignore[index]

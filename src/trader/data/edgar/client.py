@@ -86,6 +86,8 @@ class EdgarClient:
             except httpx.TransportError as exc:
                 if attempt == self.retries:
                     raise EdgarError(f"GET {url} failed: {exc}") from exc
+                if deadline is not None and time.monotonic() + delay >= deadline:
+                    raise EdgarDeferred(f"no time left to retry GET {url}") from exc
                 self.sleep(delay)
                 delay *= 2
                 continue

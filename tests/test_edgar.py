@@ -244,3 +244,30 @@ def test_ticker_map_falls_back_to_cache_when_refresh_times_out(tmp_path: Path) -
     db.kv_set("sec_ticker_map", {"date": "2026-11-23", "map": {"1019034": "BKYI"}})
     ing = EdgarIngestor(mock_client(fake_sec()), db, clock=lambda: datetime(2026, 11, 24, tzinfo=UTC))
     assert ing.ticker_map(deadline=0.0) == {1019034: "BKYI"}  # deadline long gone: yesterday's map
+
+
+def test_stale_ticker_map_older_than_a_week_is_not_used(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'old.sqlite'}")
+    db.kv_set("sec_ticker_map", {"date": "2026-11-01", "map": {"1": "OLD"}})
+    ing = EdgarIngestor(mock_client(fake_sec()), db, clock=lambda: datetime(2026, 11, 24, tzinfo=UTC))
+    with pytest.raises(EdgarError):
+        ing.ticker_map(deadline=0.0)
+
+
+def test_network_error_near_deadline_defers_without_sleeping(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trader.data.edgar.client as client_mod
+    from trader.data.edgar.client import EdgarDeferred
+
+    clock = [100.0]
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: clock[0])
+    slept: list[float] = []
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("down")
+
+    client = EdgarClient(
+        "ua", http=httpx.Client(transport=httpx.MockTransport(boom)), max_rps=10, sleep=slept.append
+    )
+    with pytest.raises(EdgarDeferred):
+        client.get("https://www.sec.gov/x", deadline=100.5)
+    assert all(s < 0.5 for s in slept)  # only throttle waits, never a retry back-off past the deadline

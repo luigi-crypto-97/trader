@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 OFFSET_KEY = "telegram_update_offset"
 KILL_COMMANDS = frozenset({"/kill", "/stop"})
+CALL_TIMEOUT = 5.0  # seconds per Telegram HTTP phase (connect/read/write)
 API = "https://api.telegram.org"
 
 
@@ -69,7 +70,7 @@ class TelegramBot:
         self._token = token
         self.chat_id = chat_id
         self.db = db
-        self.http = http or httpx.Client(timeout=10.0)
+        self.http = http or httpx.Client(timeout=CALL_TIMEOUT)
 
     def _api(self, method: str, **params: Any) -> Any:
         try:
@@ -129,7 +130,7 @@ class TelegramBot:
             self.db.kv_set(OFFSET_KEY, offset)
             try:
                 if "callback_query" in upd:
-                    handled += self._on_callback(upd["callback_query"], system)
+                    handled += self._on_callback(upd["callback_query"], system, deadline)
                 elif "message" in upd:
                     handled += self._on_message(upd["message"], system, deadline)
             except Exception as exc:
@@ -152,7 +153,7 @@ class TelegramBot:
         if not system.kill_switch_on():
             system.set_kill_switch(True, reason="telegram command", actor=f"telegram:{msg['chat']['id']}")
 
-    def _on_callback(self, cq: dict[str, Any], system: TradingSystem) -> int:
+    def _on_callback(self, cq: dict[str, Any], system: TradingSystem, deadline: float | None = None) -> int:
         message = cq.get("message") or {}
         if not self._authorized(cq):
             self._api("answerCallbackQuery", callback_query_id=cq["id"], text="Non autorizzato")
@@ -165,11 +166,17 @@ class TelegramBot:
         actor = f"telegram:{user.get('id')}:{user.get('username', '')}"
         ok, msg = system.decide(sid, approve=(action == "ap"), actor=actor)
         verdict = ("APPROVATO" if action == "ap" else "RIFIUTATO") if ok else f"NON APPLICATO ({msg})"
+
         # The decision is recorded: cosmetic Telegram calls may fail (e.g. "query is too old")
-        # without ever turning a real approval into a misleading error message.
-        with contextlib.suppress(TelegramError):
-            self._api("answerCallbackQuery", callback_query_id=cq["id"], text=verdict[:190])
-        if "message_id" in message:
+        # without ever turning a real approval into a misleading error message, and are skipped
+        # once the time budget is over (only the verdict message is always sent).
+        def in_time() -> bool:
+            return deadline is None or time.monotonic() < deadline
+
+        if in_time():
+            with contextlib.suppress(TelegramError):
+                self._api("answerCallbackQuery", callback_query_id=cq["id"], text=verdict[:190])
+        if in_time() and "message_id" in message:
             with contextlib.suppress(TelegramError):
                 self._api(
                     "editMessageReplyMarkup",
@@ -204,8 +211,7 @@ class TelegramBot:
                 self.notify("Nessun segnale in attesa.")
             for s in pending:
                 if deadline is not None and time.monotonic() >= deadline:
-                    self.notify("Altri segnali in attesa: ripeti /pending.")
-                    break
+                    break  # the rest is shown at the next /pending
                 self.notify_pending(s)
             return 1
         if text in {"/help", "/start"}:

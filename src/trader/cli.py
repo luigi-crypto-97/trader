@@ -142,9 +142,14 @@ def doctor() -> None:
     )
     checks["approval_mode"] = s.approval_mode
     checks["sec_user_agent"] = "ok" if s.sec_user_agent else "MANCANTE: imposta TRADER_SEC_USER_AGENT"
-    checks["telegram"] = (
-        "ok" if s.telegram_bot_token and s.telegram_chat_id else "non configurato (approva da CLI)"
-    )
+    if s.telegram_bot_token and s.telegram_chat_id:
+        checks["telegram"] = (
+            "ok"
+            if s.telegram_chat_id > 0
+            else "ERRORE: TRADER_TELEGRAM_CHAT_ID deve essere la chat privata (id positivo), non un gruppo"
+        )
+    else:
+        checks["telegram"] = "non configurato (approva da CLI)"
     checks["llm"] = (
         f"attivo ({s.llm_triage_model} -> {s.llm_analysis_model})" if s.llm_enabled else "disattivo"
     )
@@ -288,6 +293,7 @@ def reject(signal_id: str, note: str = "") -> None:
 # --------------------------------------------------------------------- cycle
 TELEGRAM_BUDGET = 30.0  # seconds of Telegram command handling before the trading cycle
 MIN_INTERVAL = 60  # seconds: leaves room for the Telegram budget and optional work
+POLL_GUARD = 20.0  # seconds: no between-cycle Telegram polling closer than this to the next cycle
 
 
 def _one_cycle(rt: Runtime, *, ingest: bool, generate: bool, deadline: float | None = None) -> dict[str, Any]:
@@ -367,12 +373,15 @@ def run(
                     log.exception("cycle failed; continuing")
                     rt = alerts.failed(rt, exc, rebuild=partial(build_runtime, start_settings))
                     next_cycle = now + min(interval, 60)  # retry the trading cycle soon
-            elif rt.telegram is not None:
-                try:  # between cycles: bounded so that it never delays the next trading cycle
-                    rt.telegram.process_updates(rt.system, deadline=next_cycle - 5)
+            elif rt.telegram is not None and next_cycle - now >= POLL_GUARD:
+                # Between cycles, and only with enough time left: a command started here ends (at
+                # most one Telegram call past the deadline) before the next trading cycle is due.
+                try:
+                    rt.telegram.process_updates(rt.system, deadline=next_cycle - POLL_GUARD)
                 except Exception as exc:
                     log.warning("telegram polling failed: %s", exc)
-            time.sleep(poll)
+            # Never sleep past the next cycle.
+            time.sleep(max(0.0, min(poll, next_cycle - time.monotonic())))
     except KeyboardInterrupt:
         typer.echo("Arresto richiesto.")
     finally:

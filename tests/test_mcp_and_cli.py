@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal as D
@@ -533,3 +534,60 @@ def test_run_rejects_too_short_interval(cli_env: Path) -> None:
 
     res = CliRunner().invoke(app, ["run", "--interval", "10", "--poll", "10"])
     assert res.exit_code != 0
+
+
+def test_run_loop_starts_cycles_on_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    import trader.cli as cli_mod
+
+    clock = [1000.0]
+    starts: list[float] = []
+
+    class SlowTelegram:
+        def process_updates(self, system: object, deadline: float | None = None) -> int:
+            clock[0] = max(clock[0], min(clock[0] + 15.0, (deadline or clock[0]) + 5.0))  # slow poll
+            return 0
+
+        def notify(self, text: str) -> None:
+            return None
+
+    rt = SimpleNamespace(
+        telegram=SlowTelegram(),
+        system=None,
+        broker=SimpleNamespace(name="sim"),
+        settings=SimpleNamespace(approval_mode="manual"),
+        close=lambda: None,
+    )
+
+    def fake_cycle(
+        runtime: object, *, ingest: bool, generate: bool, deadline: float | None = None
+    ) -> dict[str, object]:
+        starts.append(clock[0])
+        clock[0] += 3.0
+        return {}
+
+    def fake_sleep(seconds: float) -> None:
+        if len(starts) >= 4:
+            raise KeyboardInterrupt
+        clock[0] += seconds
+
+    monkeypatch.setattr(cli_mod, "_rt", lambda: rt)
+    monkeypatch.setattr(cli_mod, "_one_cycle", fake_cycle)
+    monkeypatch.setattr(cli_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli_mod.time, "sleep", fake_sleep)
+    cli_mod.run(interval=60, poll=59)
+    gaps = [b - a for a, b in itertools.pairwise(starts)]
+    assert all(g <= 60 + 1 for g in gaps), gaps  # never later than scheduled, even with poll ~ interval
+
+
+def test_run_interval_validation_codes(cli_env: Path) -> None:
+    from trader.cli import app
+
+    runner = CliRunner()
+    for args in (
+        ["--interval", "10"],
+        ["--interval", "60", "--poll", "60"],
+        ["--interval", "60", "--poll", "0"],
+    ):
+        assert runner.invoke(app, ["run", *args]).exit_code == 2

@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 LISTED_EXCHANGES = frozenset({"NYSE", "Nasdaq"})
 SUPPORTED_FORMS = frozenset({"4", "8-K"})
 TICKER_CACHE_KEY = "sec_ticker_map"
+MAX_TICKER_MAP_AGE_DAYS = 7
 
 
 @dataclass
@@ -70,7 +71,11 @@ class EdgarIngestor:
         try:
             raw = self.client.ticker_exchange_map(deadline=deadline)
         except EdgarError:
-            if cached:
+            fresh_enough = (
+                cached
+                and (self.clock().date() - date.fromisoformat(cached["date"])).days <= MAX_TICKER_MAP_AGE_DAYS
+            )
+            if fresh_enough:
                 return {int(k): v for k, v in cached["map"].items()}
             raise
         mapping = {cik: t for cik, (t, exch) in raw.items() if exch in self.exchanges}
