@@ -143,14 +143,18 @@ class TelegramBot:
         actor = f"telegram:{user.get('id')}:{user.get('username', '')}"
         ok, msg = system.decide(sid, approve=(action == "ap"), actor=actor)
         verdict = ("APPROVATO" if action == "ap" else "RIFIUTATO") if ok else f"NON APPLICATO ({msg})"
-        self._api("answerCallbackQuery", callback_query_id=cq["id"], text=verdict[:190])
+        # The decision is recorded: cosmetic Telegram calls may fail (e.g. "query is too old")
+        # without ever turning a real approval into a misleading error message.
+        with contextlib.suppress(TelegramError):
+            self._api("answerCallbackQuery", callback_query_id=cq["id"], text=verdict[:190])
         if "message_id" in message:
-            self._api(
-                "editMessageReplyMarkup",
-                chat_id=self.chat_id,
-                message_id=message["message_id"],
-                reply_markup={"inline_keyboard": []},
-            )
+            with contextlib.suppress(TelegramError):
+                self._api(
+                    "editMessageReplyMarkup",
+                    chat_id=self.chat_id,
+                    message_id=message["message_id"],
+                    reply_markup={"inline_keyboard": []},
+                )
         self.notify(f"Segnale {sid[:8]}: {verdict}")
         return 1
 

@@ -158,7 +158,12 @@ def build_server(lab: Lab | None = None) -> MCPServer:
     def insider_clusters() -> list[dict[str, Any]]:
         from trader.signals.insider import find_insider_clusters
 
-        return [s.model_dump(mode="json") for s in find_insider_clusters(lab.db, lab.now())]
+        limits = lab.settings.risk_limits()
+        return [
+            s.model_dump(mode="json")
+            for s in find_insider_clusters(lab.db, lab.now())
+            if not limits.is_restricted(s.ticker)  # private list
+        ]
 
     @server.tool(
         description=(

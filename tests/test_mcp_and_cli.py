@@ -371,14 +371,106 @@ def test_failure_alerts_notify_and_reconnect() -> None:
     from trader.cli import FailureAlerts
 
     sent: list[str] = []
+    events: list[str] = []
     tg = SimpleNamespace(notify=sent.append)
-    old = SimpleNamespace(telegram=tg, close=lambda: None)
-    new = SimpleNamespace(telegram=tg, close=lambda: None)
+    audit = SimpleNamespace(record=lambda event, payload, ts=None: events.append(event))
+    old = SimpleNamespace(telegram=tg, close=lambda: events.append("old closed"))
+    new = SimpleNamespace(telegram=tg, close=lambda: None, audit=audit, clock=lambda: None)
     t = [0.0]
     alerts = FailureAlerts(every=1800, clock=lambda: t[0])
     assert alerts.failed(old, RuntimeError("boom"), rebuild=lambda: new) is old  # type: ignore[arg-type]
-    assert alerts.failed(old, BrokerError("gateway down"), rebuild=lambda: new) is new  # type: ignore[arg-type]
+    rebuilt = alerts.failed(old, BrokerError("gateway down"), rebuild=lambda: events.append("rebuilt") or new)  # type: ignore[arg-type]
+    assert rebuilt is new and events[:2] == ["old closed", "rebuilt"]  # old connection released first
+    assert "broker.reconnected" in events
     assert sum("ciclo fallito" in m for m in sent) == 1  # throttled
     assert any("ripristinata" in m for m in sent)
     alerts.recovered(new)  # type: ignore[arg-type]
     assert sent[-1] == "Ciclo di nuovo regolare."
+
+
+def test_cycle_still_exits_when_optional_phases_fail(cli_env: Path) -> None:
+    from decimal import Decimal
+
+    from trader.cli import _one_cycle
+    from trader.domain import Quote, Signal
+    from trader.runtime import build_runtime
+
+    rt = build_runtime(Settings(_env_file=None))  # type: ignore[call-arg]
+    clock = [datetime(2026, 11, 24, 15, tzinfo=UTC)]
+    rt.system.clock = lambda: clock[0]
+    rt.broker.clock = lambda: clock[0]  # type: ignore[attr-defined]
+
+    def q(price: str) -> Quote:
+        p = Decimal(price)
+        return Quote(
+            ticker="ACME",
+            ts=clock[0],
+            bid=p - Decimal("0.01"),
+            ask=p + Decimal("0.01"),
+            last=p,
+            avg_daily_dollar_volume=Decimal("100000000"),
+        )
+
+    rt.broker.set_quote(q("50"))  # type: ignore[attr-defined]
+    sig = Signal(
+        source="t",
+        ticker="ACME",
+        horizon_days=30,
+        conviction=D("0.8"),
+        stop_loss_pct=D("0.08"),
+        thesis="t",
+        dedup_key="oc1",
+        created_at=clock[0],
+    )
+    rt.system.submit_signal(sig)
+    rt.system.run_cycle()
+    rt.system.decide(sig.id, approve=True, actor="t")
+    rt.system.run_cycle()
+    stop = D(rt.system.status()["positions"]["ACME"]["exit_plan"]["stop_price"])
+
+    class Broken:
+        def process_updates(self, system: object) -> int:
+            raise ConnectionError("telegram unreachable")
+
+    def llm_down(**_: object) -> list[object]:
+        raise RuntimeError("anthropic 529 overloaded")
+
+    rt.telegram = Broken()  # type: ignore[assignment]
+    rt.generate_signals = llm_down  # type: ignore[method-assign,assignment]
+    clock[0] = clock[0].replace(minute=10)
+    rt.broker.set_quote(q(str(stop - 1)))  # type: ignore[attr-defined]
+    out = _one_cycle(rt, ingest=False, generate=True)
+    assert "telegram_updates_error" in out and "new_signals_error" in out
+    assert out["cycle"]["exits"] == 1
+
+
+def test_mcp_insider_screen_hides_private_tickers(tmp_path: Path) -> None:
+    lab = Lab(settings(tmp_path))
+    now = datetime.now(UTC)
+    with lab.db.session() as s:
+        for owner in (1, 2):
+            s.add(
+                InsiderTransactionRow(
+                    accession=f"p{owner}",
+                    seq=0,
+                    issuer_cik=1,
+                    ticker="SECRT",
+                    owner_cik=owner,
+                    owner_name=f"O{owner}",
+                    is_director=True,
+                    is_officer=True,
+                    is_ten_pct_owner=False,
+                    officer_title="CEO",
+                    transaction_date=now.date(),
+                    code="P",
+                    acquired_disposed="A",
+                    shares=D("10000"),
+                    price=D("30"),
+                    shares_owned_after=None,
+                    direct=True,
+                    is_10b5_1=False,
+                    accepted_at=now - timedelta(days=1),
+                    ingested_at=now,
+                )
+            )
+    assert call(build_server(lab), "insider_clusters") == []

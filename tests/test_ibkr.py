@@ -163,3 +163,26 @@ def test_disconnected_gateway_raises_instead_of_reporting_nothing(ib: FakeIB) ->
     for call in (lambda: broker.order_status("x"), broker.account, lambda: broker.fills_since(None)):
         with pytest.raises(BrokerError):
             call()
+
+
+def test_place_errors_before_and_after_submission(ib: FakeIB) -> None:
+    from trader.broker.base import BrokerError
+
+    broker = IbkrBroker(ib, clock=lambda: NOW, settle_wait=0)
+
+    def qualify_down(c: Any) -> list[Any]:
+        raise ConnectionError("socket reset")
+
+    ib.qualifyContracts = qualify_down  # type: ignore[method-assign]
+    with pytest.raises(BrokerError):  # certainly not sent
+        broker.place(OrderRequest(ticker="NEWT", side=Side.BUY, qty=D("1"), limit_price=D("10")))
+
+    ib.qualifyContracts = lambda c: [c]  # type: ignore[method-assign]
+
+    def place_down(contract: Any, order: Any) -> Any:
+        raise ConnectionError("lost after send")
+
+    ib.placeOrder = place_down  # type: ignore[method-assign]
+    with pytest.raises(Exception) as info:  # outcome unknown: must NOT look like "not sent"
+        broker.place(OrderRequest(ticker="NEWT", side=Side.BUY, qty=D("1"), limit_price=D("10")))
+    assert not isinstance(info.value, BrokerError)

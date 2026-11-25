@@ -253,7 +253,12 @@ class IbkrBroker:
             return self._result(order.client_order_id, existing, "already submitted")
         from ib_async import LimitOrder, MarketOrder
 
-        contract = self._contract(order.ticker)
+        try:  # nothing has been sent yet: any failure here means "certainly not submitted"
+            contract = self._contract(order.ticker)
+        except BrokerError:
+            raise
+        except Exception as exc:
+            raise BrokerError(f"contract lookup failed before submission: {exc}") from exc
         action = "BUY" if order.side is Side.BUY else "SELL"
         ib_order: Any
         if order.order_type is OrderType.LIMIT:

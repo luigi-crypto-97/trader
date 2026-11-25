@@ -173,3 +173,36 @@ def test_anthropic_caller_refusal_raises() -> None:
     caller = AnthropicJsonCaller(fake_client("", stop="refusal"))
     with pytest.raises(LlmRefusal):
         caller(model="claude-opus-5-5", system="s", user="u", schema={}, max_tokens=10, effort="low")
+
+
+def test_batch_survives_api_errors_and_skips_private_tickers(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'b.sqlite'}")
+    with db.session() as s:
+        s.add(filing(ticker="SECRT", accession="0000000003-26-000003"))
+        s.add(FilingTextRow(accession="0000000003-26-000003", text=TEXT))
+        s.add(filing())
+        s.add(FilingTextRow(accession="0000000001-26-000001", text=TEXT))
+    seen: list[str] = []
+
+    class Down:
+        def __call__(self, **kw: Any) -> tuple[dict[str, Any], dict[str, int]]:
+            seen.append(kw["user"])
+            raise ConnectionError("overloaded")
+
+    outcomes: list[str] = []
+    for _ in range(3):
+        assert (
+            analyze_recent_8k(
+                db,
+                FilingAnalyzer(Down()),
+                NOW,
+                exclude_tickers=("SECRT",),
+                on_outcome=lambda o: outcomes.append(o.accession),
+            )
+            == []
+        )
+    assert all("SECRT" not in u for u in seen)  # the private ticker never reaches the model
+    assert outcomes == ["0000000001-26-000001"] * 3
+    with db.session() as s:
+        assert s.get(FilingRow, "0000000001-26-000001").analyzed  # type: ignore[union-attr]  # given up
+        assert not s.get(FilingRow, "0000000003-26-000003").analyzed  # type: ignore[union-attr]

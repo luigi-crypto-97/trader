@@ -146,3 +146,24 @@ def test_kill_processed_even_if_an_earlier_command_fails(tmp_path: Path) -> None
     bot.process_updates(system)
     assert system.kill_switch_on()
     assert bot.process_updates(system) == 0  # both acknowledged: nothing is reprocessed
+
+
+def test_approval_survives_stale_callback_query(tmp_path: Path) -> None:
+    system, bot, fake = setup(tmp_path)
+    sig = make_signal()
+    system.submit_signal(sig)
+    system.run_cycle()
+    original = fake.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/answerCallbackQuery"):
+            return httpx.Response(400, json={"ok": False, "description": "query is too old"})
+        return original(request)
+
+    bot.http = httpx.Client(transport=httpx.MockTransport(handler))
+    fake.updates = [callback(20, f"ap:{sig.id}", chat=CHAT)]
+    bot.process_updates(system)
+    s = system.get_signal(sig.id)
+    assert s is not None and s["status"] == "APPROVED"
+    texts = [b.get("text", "") for m, b in fake.sent if m == "sendMessage"]
+    assert any("APPROVATO" in t for t in texts) and not any("Comando non eseguito" in t for t in texts)

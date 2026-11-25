@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -336,8 +336,14 @@ def analyze_recent_8k(
     max_age: timedelta = timedelta(days=2),
     limit: int = 20,
     on_outcome: Callable[[AnalysisOutcome], None] | None = None,
+    exclude_tickers: Collection[str] = (),
+    max_attempts: int = 3,
 ) -> list[Signal]:
-    """Analyze not-yet-analyzed 8-Ks of listed companies accepted within ``max_age``."""
+    """Analyze not-yet-analyzed 8-Ks of listed companies accepted within ``max_age``.
+
+    ``exclude_tickers`` (the private restricted list) are never sent to the model nor marked, so
+    they look exactly like filings that were not analyzed. A filing whose analysis keeps failing is
+    given up after ``max_attempts`` cycles."""
     with db.session() as s:
         filings = list(
             s.scalars(
@@ -348,6 +354,7 @@ def analyze_recent_8k(
                     FilingRow.ticker.is_not(None),
                     FilingRow.accepted_at <= now,
                     FilingRow.accepted_at > now - max_age,
+                    FilingRow.ticker.not_in(list(exclude_tickers)),
                 )
                 .order_by(FilingRow.accepted_at.desc())
                 .limit(limit)
@@ -360,11 +367,15 @@ def analyze_recent_8k(
         text = text_row.text if text_row else ""
         try:
             outcome = analyzer.analyze(f, text, now)
-        except LlmError as exc:
-            outcome = AnalysisOutcome(f.accession, None, "error", str(exc))
+        except Exception as exc:  # API outages, bad requests, parsing: never stop the batch
+            outcome = AnalysisOutcome(f.accession, None, "error", f"{type(exc).__name__}: {str(exc)[:500]}")
+        attempts_key = f"llm_attempts:{f.accession}"
+        attempts = int(db.kv_get(attempts_key, 0)) + 1
+        if outcome.stage == "error":
+            db.kv_set(attempts_key, attempts)
         with db.session() as s:
             row = s.get(FilingRow, f.accession)
-            if row is not None and outcome.stage != "error":
+            if row is not None and (outcome.stage != "error" or attempts >= max_attempts):
                 row.analyzed = True
         if on_outcome:
             on_outcome(outcome)

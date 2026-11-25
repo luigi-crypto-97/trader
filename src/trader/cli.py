@@ -7,6 +7,7 @@ import logging
 import time
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -84,15 +85,18 @@ class FailureAlerts:
                 "Uscite e ingressi sospesi finché il problema persiste.",
             )
         if isinstance(exc, BrokerError):
-            try:
-                fresh: Runtime = rebuild()
-            except Exception as again:
-                log.warning("reconnection failed: %s", again)
-                return rt
+            # Release the old connection (and save simulator state) before opening a new one, so
+            # two sessions never share the same IB client id.
             try:
                 rt.close()
             except Exception as close_exc:
                 log.warning("closing the old connection failed: %s", close_exc)
+            try:
+                fresh: Runtime = rebuild()
+            except Exception as again:
+                log.warning("reconnection failed: %s", again)
+                return rt  # still broken: the next cycle raises BrokerError and retries
+            fresh.audit.record("broker.reconnected", {"after": type(exc).__name__}, ts=fresh.clock())
             self._send(fresh, "Connessione al broker ripristinata.")
             return fresh
         return rt
@@ -280,18 +284,25 @@ def reject(signal_id: str, note: str = "") -> None:
 
 # --------------------------------------------------------------------- cycle
 def _one_cycle(rt: Runtime, *, ingest: bool, generate: bool) -> dict[str, Any]:
+    """Optional phases (Telegram, ingestion, signal generation) are isolated: whatever they raise,
+    the trading cycle (sync, stop-loss and time exits, approved orders) still runs."""
     out: dict[str, Any] = {}
-    if rt.telegram is not None:
-        out["telegram_updates"] = rt.telegram.process_updates(rt.system)
-    if ingest and rt.settings.sec_user_agent:
+
+    def optional(name: str, fn: Any) -> None:
         try:
-            out["daily_ingest"] = rt.ingest_previous_day_once()
-            out["ingest"] = {k: v for k, v in rt.ingest(latest=True).items() if k != "errors"}
+            out[name] = fn()
         except Exception as exc:
-            log.warning("ingest failed: %s", exc)
-            out["ingest_error"] = str(exc)
+            log.warning("%s failed: %s", name, exc)
+            out[f"{name}_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+
+    if rt.telegram is not None:
+        telegram = rt.telegram
+        optional("telegram_updates", lambda: telegram.process_updates(rt.system))
+    if ingest and rt.settings.sec_user_agent:
+        optional("daily_ingest", rt.ingest_previous_day_once)
+        optional("ingest", lambda: {k: v for k, v in rt.ingest(latest=True).items() if k != "errors"})
     if generate:
-        out["new_signals"] = sum(1 for _, new in rt.generate_signals() if new)
+        optional("new_signals", lambda: sum(1 for _, new in rt.generate_signals() if new))
     out["cycle"] = rt.system.run_cycle().__dict__
     rt.save()
     return out
@@ -319,6 +330,7 @@ def run(
     typer.echo(f"Avvio: broker={rt.broker.name}, approvazione={rt.settings.approval_mode}, ciclo={interval}s")
     next_cycle = 0.0
     alerts = FailureAlerts()
+    start_settings = rt.settings  # reconnections reuse the start configuration (no silent reload)
     try:
         while True:
             now = time.monotonic()
@@ -331,7 +343,7 @@ def run(
                     rt.telegram.process_updates(rt.system)
             except Exception as exc:
                 log.exception("cycle failed; continuing")
-                rt = alerts.failed(rt, exc, rebuild=_rt)
+                rt = alerts.failed(rt, exc, rebuild=partial(build_runtime, start_settings))
                 next_cycle = min(next_cycle, now + 60)  # retry soon after a failure
             time.sleep(poll)
     except KeyboardInterrupt:
