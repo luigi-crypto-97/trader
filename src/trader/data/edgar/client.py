@@ -16,6 +16,7 @@ import httpx
 from trader.data.edgar.index import IndexEntry, parse_latest_atom, parse_master_index
 
 WWW = "https://www.sec.gov"
+REQUEST_TIMEOUT = 30.0
 DATA = "https://data.sec.gov"
 
 
@@ -23,7 +24,18 @@ _BLOCKED_MARKERS = ("Request Rate Threshold Exceeded", "Undeclared Automated Too
 
 
 class EdgarError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+    @property
+    def transient(self) -> bool:
+        """Worth retrying later: network problems, rate limits, server errors."""
+        return self.status is None or self.status == 429 or self.status >= 500
+
+
+class EdgarDeferred(EdgarError):
+    """The caller's deadline passed: the request was not (re)tried."""
 
 
 class EdgarClient:
@@ -55,12 +67,20 @@ class EdgarClient:
                 self.sleep(wait)
             self._last = time.monotonic()
 
-    def get(self, url: str, *, allow_404: bool = False) -> httpx.Response | None:
+    def get(
+        self, url: str, *, allow_404: bool = False, deadline: float | None = None
+    ) -> httpx.Response | None:
+        """``deadline`` (time.monotonic) bounds the whole call: no attempt starts after it and each
+        request's timeout is capped to the time left."""
         delay = 1.0
         for attempt in range(self.retries + 1):
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
+                raise EdgarDeferred(f"deadline reached before GET {url}")
             self._throttle()
+            timeout = REQUEST_TIMEOUT if left is None else max(1.0, min(REQUEST_TIMEOUT, left))
             try:
-                resp = self.http.get(url, headers=self.headers)
+                resp = self.http.get(url, headers=self.headers, timeout=timeout)
             except httpx.TransportError as exc:
                 if attempt == self.retries:
                     raise EdgarError(f"GET {url} failed: {exc}") from exc
@@ -72,7 +92,7 @@ class EdgarClient:
             if resp.status_code == 403:
                 body = resp.text[:5000]
                 if any(m in body for m in _BLOCKED_MARKERS):
-                    raise EdgarError(f"SEC blocked the request (rate limit or User-Agent policy): {url}")
+                    raise EdgarError(f"SEC blocked the request (rate limit or User-Agent policy): {url}", 429)
                 if allow_404:  # EDGAR archives answer 403 for files that do not exist (e.g. holidays)
                     return None
             if resp.status_code in (429, 500, 502, 503, 504) and attempt < self.retries:
@@ -80,7 +100,7 @@ class EdgarClient:
                 delay *= 2
                 continue
             if resp.status_code != 200:
-                raise EdgarError(f"GET {url} -> HTTP {resp.status_code}")
+                raise EdgarError(f"GET {url} -> HTTP {resp.status_code}", resp.status_code)
             return resp
         raise EdgarError(f"GET {url} exhausted retries")
 
@@ -99,22 +119,22 @@ class EdgarClient:
                 out[cik] = (ticker.upper(), exch)
         return out
 
-    def master_index(self, day: date) -> list[IndexEntry]:
+    def master_index(self, day: date, deadline: float | None = None) -> list[IndexEntry]:
         quarter = (day.month - 1) // 3 + 1
         url = f"{WWW}/Archives/edgar/daily-index/{day.year}/QTR{quarter}/master.{day:%Y%m%d}.idx"
-        resp = self.get(url, allow_404=True)  # 404 on weekends/holidays
+        resp = self.get(url, allow_404=True, deadline=deadline)  # missing on weekends/holidays
         return parse_master_index(resp.text) if resp is not None else []
 
-    def latest(self, form: str, count: int = 100) -> list[IndexEntry]:
+    def latest(self, form: str, count: int = 100, deadline: float | None = None) -> list[IndexEntry]:
         url = (
             f"{WWW}/cgi-bin/browse-edgar?action=getcurrent&type={form}&company=&dateb="
             f"&owner=include&start=0&count={count}&output=atom"
         )
-        resp = self.get(url)
+        resp = self.get(url, deadline=deadline)
         assert resp is not None
         return parse_latest_atom(resp.text, form)
 
-    def submission_text(self, path: str) -> str:
-        resp = self.get(f"{WWW}/Archives/{path.lstrip('/')}")
+    def submission_text(self, path: str, deadline: float | None = None) -> str:
+        resp = self.get(f"{WWW}/Archives/{path.lstrip('/')}", deadline=deadline)
         assert resp is not None
         return resp.text

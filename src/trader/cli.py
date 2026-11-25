@@ -286,10 +286,17 @@ def reject(signal_id: str, note: str = "") -> None:
 
 
 # --------------------------------------------------------------------- cycle
-def _one_cycle(rt: Runtime, *, ingest: bool, generate: bool) -> dict[str, Any]:
-    """Optional phases (Telegram, ingestion, signal generation) are isolated: whatever they raise,
-    the trading cycle (sync, stop-loss and time exits, approved orders) still runs."""
+TELEGRAM_BUDGET = 30.0  # seconds of Telegram command handling before the trading cycle
+
+
+def _one_cycle(rt: Runtime, *, ingest: bool, generate: bool, deadline: float | None = None) -> dict[str, Any]:
+    """One cycle. Optional phases are isolated (their errors never stop the trading cycle) and
+    time-bounded: Telegram gets TELEGRAM_BUDGET before trading; ingestion and signal generation run
+    after trading and stop at ``deadline`` (time.monotonic), so the next cycle starts on time.
+    Work left over is picked up by the next cycle."""
     out: dict[str, Any] = {}
+    if deadline is None:
+        deadline = time.monotonic() + 300.0
 
     def optional(name: str, fn: Any) -> None:
         try:
@@ -298,19 +305,23 @@ def _one_cycle(rt: Runtime, *, ingest: bool, generate: bool) -> dict[str, Any]:
             log.warning("%s failed: %s", name, exc)
             out[f"{name}_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
 
-    # 1) human commands first (approvals, /kill), then 2) the trading cycle - sync, stop-loss and
-    # time exits, approved orders - and only afterwards 3) the slow optional work. New signals are
-    # reviewed on the next cycle, so a slow SEC or LLM call can never delay an exit.
+    # 1) human commands (approvals, /kill), bounded; 2) the trading cycle - sync, stop-loss and
+    # time exits, approved orders; 3) slow optional work, bounded by the deadline. New signals are
+    # reviewed on the next cycle.
     if rt.telegram is not None:
         telegram = rt.telegram
-        optional("telegram_updates", lambda: telegram.process_updates(rt.system))
+        tg_deadline = min(deadline, time.monotonic() + TELEGRAM_BUDGET)
+        optional("telegram_updates", lambda: telegram.process_updates(rt.system, deadline=tg_deadline))
     out["cycle"] = rt.system.run_cycle().__dict__
     rt.save()
     if ingest and rt.settings.sec_user_agent:
-        optional("daily_ingest", rt.ingest_previous_day_once)
-        optional("ingest", lambda: {k: v for k, v in rt.ingest(latest=True).items() if k != "errors"})
+        optional("daily_ingest", lambda: rt.ingest_previous_day_once(deadline=deadline))
+        optional(
+            "ingest",
+            lambda: {k: v for k, v in rt.ingest(latest=True, deadline=deadline).items() if k != "errors"},
+        )
     if generate:
-        optional("new_signals", lambda: sum(1 for _, new in rt.generate_signals() if new))
+        optional("new_signals", lambda: sum(1 for _, new in rt.generate_signals(deadline=deadline) if new))
     return out
 
 
@@ -345,7 +356,9 @@ def run(
             if now >= next_cycle:
                 next_cycle = now + interval
                 try:
-                    log.info("cycle: %s", json.dumps(_one_cycle(rt, ingest=True, generate=True), default=str))
+                    # Optional work must end before the next trading cycle is due (10 s margin).
+                    report = _one_cycle(rt, ingest=True, generate=True, deadline=next_cycle - 10)
+                    log.info("cycle: %s", json.dumps(report, default=str))
                     alerts.recovered(rt)
                 except Exception as exc:
                     log.exception("cycle failed; continuing")

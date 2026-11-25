@@ -167,3 +167,13 @@ def test_approval_survives_stale_callback_query(tmp_path: Path) -> None:
     assert s is not None and s["status"] == "APPROVED"
     texts = [b.get("text", "") for m, b in fake.sent if m == "sendMessage"]
     assert any("APPROVATO" in t for t in texts) and not any("Comando non eseguito" in t for t in texts)
+
+
+def test_updates_left_for_next_poll_after_deadline(tmp_path: Path) -> None:
+    import time as _time
+
+    system, bot, fake = setup(tmp_path)
+    fake.updates = [{"update_id": 30, "message": {"chat": {"id": CHAT}, "text": "/kill"}}]
+    assert bot.process_updates(system, deadline=_time.monotonic() - 1) == 0
+    assert not system.kill_switch_on()
+    assert bot.process_updates(system) == 1 and system.kill_switch_on()  # handled on the next poll

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -55,13 +56,18 @@ class Runtime:
             raise RuntimeError("Set TRADER_SEC_USER_AGENT (e.g. 'Nome Cognome contatto@dominio') in .env")
         return EdgarIngestor(EdgarClient(self.settings.sec_user_agent), self.db, clock=self.clock)
 
-    def ingest(self, *, latest: bool = True, day: date | None = None) -> dict[str, object]:
+    def ingest(
+        self, *, latest: bool = True, day: date | None = None, deadline: float | None = None
+    ) -> dict[str, object]:
         from trader.data.edgar.ingest import EdgarIngestor
 
         ing = self.edgar()
         assert isinstance(ing, EdgarIngestor)
-        report = ing.ingest_day(day) if day else ing.ingest_latest() if latest else None
-        if report is None:
+        if day:
+            report = ing.ingest_day(day, deadline=deadline)
+        elif latest:
+            report = ing.ingest_latest(deadline=deadline)
+        else:
             return {}
         self.audit.record(
             "ingest",
@@ -70,7 +76,7 @@ class Runtime:
         )
         return report.__dict__
 
-    def ingest_previous_day_once(self) -> dict[str, object] | None:
+    def ingest_previous_day_once(self, deadline: float | None = None) -> dict[str, object] | None:
         """Complete yesterday's filings from the master index once per day (catches what the
         intraday feed missed)."""
         today = self.clock().date()
@@ -79,7 +85,7 @@ class Runtime:
         prev = today - timedelta(days=1)
         while prev.weekday() >= 5:
             prev -= timedelta(days=1)
-        result = self.ingest(day=prev)
+        result = self.ingest(day=prev, deadline=deadline)
         # An empty or missing index (EDGAR answers 403 for files it does not have) is retried on the
         # next cycle instead of silently marking the day as complete.
         # Filings that failed to download are retried; parse errors are permanent and do not block.
@@ -87,7 +93,7 @@ class Runtime:
             int(str(result.get("candidates", 0) or 0)) > 0
             or int(str(result.get("already_stored", 0) or 0)) > 0
         )
-        if found and not result.get("download_errors"):
+        if found and not result.get("download_errors") and not result.get("deferred"):
             self.db.kv_set(DAILY_INGEST_KEY, today.isoformat())
         return result
 
@@ -104,7 +110,9 @@ class Runtime:
             ts=self.clock(),
         )
 
-    def generate_signals(self, *, use_llm: bool | None = None) -> list[tuple[Signal, bool]]:
+    def generate_signals(
+        self, *, use_llm: bool | None = None, deadline: float | None = None
+    ) -> list[tuple[Signal, bool]]:
         from trader.signals.insider import find_insider_clusters
 
         now = self.clock()
@@ -127,6 +135,7 @@ class Runtime:
                 now,
                 on_outcome=self._record_llm_outcome,
                 is_excluded=self.limits.is_restricted,  # private list: never sent to the model
+                budget_seconds=120.0 if deadline is None else max(0.0, deadline - time.monotonic()),
             )
         tradable = [s for s in produced if not self.limits.is_restricted(s.ticker)]  # private list
         return [(s, self.system.submit_signal(s)) for s in tradable]

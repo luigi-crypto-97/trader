@@ -15,7 +15,7 @@ from datetime import UTC, date, datetime
 
 from sqlalchemy import select
 
-from trader.data.edgar.client import EdgarClient, EdgarError
+from trader.data.edgar.client import EdgarClient, EdgarDeferred, EdgarError
 from trader.data.edgar.datasets import normalize_symbol
 from trader.data.edgar.form4 import OwnershipParseError, parse_ownership_xml
 from trader.data.edgar.index import IndexEntry
@@ -38,6 +38,7 @@ class IngestReport:
     insider_rows: int = 0
     errors: list[str] = field(default_factory=list)
     download_errors: int = 0  # transient: worth retrying (parse errors are permanent)
+    deferred: int = 0  # not attempted because the deadline passed (picked up next time)
 
 
 class EdgarIngestor:
@@ -72,21 +73,34 @@ class EdgarIngestor:
 
     # ----------------------------------------------------------------- ingest
     def ingest_day(
-        self, day: date, forms: Iterable[str] = SUPPORTED_FORMS, tickers: dict[int, str] | None = None
+        self,
+        day: date,
+        forms: Iterable[str] = SUPPORTED_FORMS,
+        tickers: dict[int, str] | None = None,
+        deadline: float | None = None,
     ) -> IngestReport:
-        return self.ingest_entries(self.client.master_index(day), forms, tickers=tickers)
+        entries = self.client.master_index(day, deadline=deadline)
+        return self.ingest_entries(entries, forms, tickers=tickers, deadline=deadline)
 
-    def ingest_latest(self, forms: Iterable[str] = SUPPORTED_FORMS) -> IngestReport:
+    def ingest_latest(
+        self, forms: Iterable[str] = SUPPORTED_FORMS, deadline: float | None = None
+    ) -> IngestReport:
         entries: list[IndexEntry] = []
         for form in forms:
-            entries.extend(self.client.latest(form))
-        return self.ingest_entries(entries, forms)
+            entries.extend(self.client.latest(form, deadline=deadline))
+        return self.ingest_entries(entries, forms, deadline=deadline)
 
     def ingest_entries(
-        self, entries: Iterable[IndexEntry], forms: Iterable[str], *, tickers: dict[int, str] | None = None
+        self,
+        entries: Iterable[IndexEntry],
+        forms: Iterable[str],
+        *,
+        tickers: dict[int, str] | None = None,
+        deadline: float | None = None,
     ) -> IngestReport:
         """``tickers`` (CIK -> ticker) overrides today's listing map, e.g. for historical backfills
-        that must include companies delisted since (no survivorship bias)."""
+        that must include companies delisted since (no survivorship bias). ``deadline``
+        (time.monotonic) stops starting downloads; what is left is reported as deferred."""
         wanted = set(forms) & SUPPORTED_FORMS
         tickers = tickers if tickers is not None else self.ticker_map()
         by_accession: dict[str, list[IndexEntry]] = {}
@@ -108,7 +122,11 @@ class EdgarIngestor:
         def fetch(item: tuple[str, IndexEntry]) -> tuple[str, IndexEntry, Submission | Exception]:
             acc, entry = item
             try:
-                return acc, entry, parse_submission(self.client.submission_text(entry.path))
+                return (
+                    acc,
+                    entry,
+                    parse_submission(self.client.submission_text(entry.path, deadline=deadline)),
+                )
             except (SubmissionParseError, ValueError, RuntimeError) as exc:
                 return acc, entry, exc
 
@@ -119,8 +137,11 @@ class EdgarIngestor:
             results = pool.map(fetch, todo)
         try:
             for acc, entry, outcome in results:
+                if isinstance(outcome, EdgarDeferred):
+                    report.deferred += 1
+                    continue
                 try:
-                    if isinstance(outcome, EdgarError):
+                    if isinstance(outcome, EdgarError) and outcome.transient:
                         report.download_errors += 1
                     if isinstance(outcome, Exception):
                         raise outcome

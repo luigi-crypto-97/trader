@@ -49,7 +49,6 @@ def test_mcp_tool_surface_has_no_order_tools(tmp_path: Path) -> None:
         "filing_text",
         "insider_clusters",
         "propose_signal",
-        "audit_tail",
     }
     assert not any(w in n for n in names for w in ("order", "buy", "sell", "approve", "kill"))
 
@@ -58,6 +57,7 @@ def test_mcp_status_hides_restricted_list(tmp_path: Path) -> None:
     server = build_server(Lab(settings(tmp_path)))
     status = call(server, "get_status")
     assert status["risk_limits"]["restricted_count"] == 1
+    assert status["audit_ok"] is True
     assert "SECRT" not in json.dumps(status)
 
 
@@ -235,9 +235,7 @@ def test_restricted_never_visible_through_mcp(tmp_path: Path) -> None:
             "evidence": ["x"],
         },
     )
-    exposed = json.dumps(
-        [call(server, "list_signals"), call(server, "audit_tail", {"n": 200}), call(server, "get_status")]
-    )
+    exposed = json.dumps([call(server, "list_signals"), call(server, "get_status")])
     assert "SECRT" not in exposed.upper()
 
 
@@ -301,15 +299,15 @@ def test_domain_normalizes_tickers() -> None:
     assert s.ticker == "BRK-B"
 
 
-def test_mcp_audit_view_identical_for_duplicate_and_restricted(tmp_path: Path) -> None:
+def test_mcp_view_identical_for_duplicate_and_restricted(tmp_path: Path) -> None:
     server = build_server(Lab(settings(tmp_path)))
     args = {"thesis": "t", "horizon_days": 20, "conviction": 0.7, "stop_loss_pct": 0.08, "evidence": ["x"]}
     call(server, "propose_signal", {"ticker": "DUPL", **args})
-    before = call(server, "audit_tail", {"n": 200})
+    before = [call(server, "list_signals"), call(server, "get_status")]
     dup = call(server, "propose_signal", {"ticker": "DUPL", **args})
-    after_dup = call(server, "audit_tail", {"n": 200})
+    after_dup = [call(server, "list_signals"), call(server, "get_status")]
     restricted = call(server, "propose_signal", {"ticker": "SECRT", **args})
-    after_restricted = call(server, "audit_tail", {"n": 200})
+    after_restricted = [call(server, "list_signals"), call(server, "get_status")]
     assert dup == restricted
     assert before == after_dup == after_restricted
 
@@ -360,7 +358,8 @@ def test_mcp_hides_records_of_signals_dropped_at_execution(tmp_path: Path) -> No
     system.limits = RiskLimits(restricted=["LATER"])
     system.risk = RiskEngine(system.limits, system.commissions)
     system.run_cycle()
-    view = json.dumps(call(build_server(lab), "audit_tail", {"n": 200}))
+    server = build_server(lab)
+    view = json.dumps([call(server, "list_signals"), call(server, "get_status")])
     assert sig.id not in view and "LATER" not in view
 
 
@@ -432,10 +431,14 @@ def test_cycle_still_exits_when_optional_phases_fail(cli_env: Path) -> None:
         def process_updates(self, system: object) -> int:
             raise ConnectionError("telegram unreachable")
 
+    seen_sells: list[int] = []
+
     def llm_down(**_: object) -> list[object]:
-        # Slow/optional work runs only after the trading cycle: the stop exit is already sent.
-        sells = [o for o in rt.broker.orders.values() if o.request.side.value == "SELL"]  # type: ignore[attr-defined]
-        assert sells, "exit must be placed before signal generation"
+        # Record what had happened when the slow optional phase started (asserted outside, because
+        # exceptions raised here are swallowed by the isolation wrapper).
+        seen_sells.append(
+            sum(1 for o in rt.broker.orders.values() if o.request.side.value == "SELL")  # type: ignore[attr-defined]
+        )
         raise RuntimeError("anthropic 529 overloaded")
 
     rt.telegram = Broken()  # type: ignore[assignment]
@@ -443,8 +446,9 @@ def test_cycle_still_exits_when_optional_phases_fail(cli_env: Path) -> None:
     clock[0] = clock[0].replace(minute=10)
     rt.broker.set_quote(q(str(stop - 1)))  # type: ignore[attr-defined]
     out = _one_cycle(rt, ingest=False, generate=True)
-    assert "telegram_updates_error" in out and "new_signals_error" in out
+    assert "telegram_updates_error" in out and out["new_signals_error"].startswith("RuntimeError")
     assert out["cycle"]["exits"] == 1
+    assert seen_sells == [1]  # the stop exit was already sent when the slow phase began
 
 
 def test_mcp_insider_screen_hides_private_tickers(tmp_path: Path) -> None:
@@ -521,4 +525,3 @@ def test_mcp_cannot_tell_private_8k_from_others(tmp_path: Path) -> None:
     filings = call(server, "recent_filings", {"form": "8-K"})
     assert {tuple(sorted(f)) for f in filings} == {tuple(sorted(filings[0]))}  # identical shape
     assert all("analyzed" not in json.dumps(f) for f in filings)
-    assert "0000000001-26-000001" not in json.dumps(call(server, "audit_tail", {"n": 200}))

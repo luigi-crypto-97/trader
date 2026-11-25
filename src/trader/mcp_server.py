@@ -1,7 +1,8 @@
 """MCP server exposing the trading lab to AI agents (Claude Code, Claude Desktop).
 
 Deliberately capability-limited:
-* read-only access to filings, insider data, signals, account snapshot, risk limits and audit;
+* read-only access to filings, insider data, signals, account snapshot, risk limits and the
+  audit-integrity verdict (not the audit records themselves);
 * exactly one write tool, ``propose_signal``, which only queues an idea as PROPOSED. Sizing, the
   deterministic risk engine and human approval still stand between it and any order;
 * no broker connection and no order tools of any kind.
@@ -55,6 +56,9 @@ def build_server(lab: Lab | None = None) -> MCPServer:
             counts = dict(s.execute(select(SignalRow.status, func.count()).group_by(SignalRow.status)).all())
         return {
             "kill_switch": lab.db.kv_get(KILL_SWITCH_KEY, {"on": False}),
+            # Only the integrity verdict: the audit log itself is not exposed to agents (record
+            # sequence and content would allow inferring the private restricted list).
+            "audit_ok": lab.audit.verify().ok,
             "last_account": lab.db.kv_get(LAST_ACCOUNT_KEY),
             "signals_by_status": counts,
             # The restricted list is private: expose only its size.
@@ -216,26 +220,6 @@ def build_server(lab: Lab | None = None) -> MCPServer:
             "signal_id": signal.id,
             "note": "queued for sizing, risk check and human approval",
         }
-
-    @server.tool(description="Last N audit-log records (hash-chained).")
-    def audit_tail(n: int = 20) -> list[dict[str, Any]]:
-        n = min(max(n, 1), 200)
-        records = lab.audit.tail(n * 3)
-        with lab.db.session() as s:
-            live = set(s.scalars(select(SignalRow.id)))
-
-        def visible(r: dict[str, Any]) -> bool:
-            # Records about privately dropped signals would let an agent infer the private list:
-            # hide the drop itself and every record that refers to a signal that no longer exists.
-            # LLM analysis records and per-filing analysis flags are not exposed either: the private
-            # list is never analysed, so their absence would reveal it.
-            if r["event"] in {"signal.dropped", "llm.analysis"}:
-                return False
-            payload = json.loads(r["payload"])
-            ref = payload.get("signal_id") or (payload.get("id") if r["event"] == "signal.proposed" else None)
-            return ref is None or str(ref) in live
-
-        return [r for r in records if visible(r)][-n:]
 
     return server
 

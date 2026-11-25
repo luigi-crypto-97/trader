@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -226,9 +226,94 @@ def test_batch_postponed_on_api_outage_without_penalty(tmp_path: Path) -> None:
     assert db.kv_get("llm_attempts:0000000001-26-000001") is None
 
 
-def test_batch_respects_time_budget(tmp_path: Path) -> None:
+class Clocked:
+    """Fake caller on a fake clock: every call takes ``cost`` seconds (or its timeout, if shorter)."""
+
+    def __init__(self, cost: float, fail: Exception | None = None, newest_only: bool = False) -> None:
+        self.now = 0.0
+        self.cost = cost
+        self.fail = fail
+        self.newest_only = newest_only
+        self.timeouts: list[float | None] = []
+        self.users: list[str] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def __call__(self, **kw: Any) -> tuple[dict[str, Any], dict[str, int]]:
+        timeout = kw.get("timeout")
+        self.timeouts.append(timeout)
+        self.users.append(kw["user"])
+        self.now += min(self.cost, timeout) if timeout is not None else self.cost
+        if self.fail is not None and (not self.newest_only or "0000000004-26-000004" in kw["user"]):
+            raise self.fail
+        return {"relevant": False, "event_type": "other", "summary": "routine"}, {}
+
+
+def test_batch_stays_within_hard_budget(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'hb.sqlite'}")
+    with db.session() as s:
+        for i in range(1, 6):
+            acc = f"000000000{i}-26-00000{i}"
+            s.add(
+                FilingRow(
+                    accession=acc,
+                    cik=i,
+                    ticker=f"T{i}",
+                    company="c",
+                    form="8-K",
+                    items="x",
+                    filed_date=date(2026, 11, 24),
+                    accepted_at=NOW,
+                    ingested_at=NOW,
+                    url=f"https://www.sec.gov/{acc}",
+                    analyzed=False,
+                )
+            )
+            s.add(FilingTextRow(accession=acc, text=TEXT))
+    caller = Clocked(cost=50)
+    analyze_recent_8k(db, FilingAnalyzer(caller), NOW, budget_seconds=120, monotonic=caller.clock)
+    assert caller.now <= 120  # never beyond the budget
+    assert all(t is not None and t <= 120 for t in caller.timeouts)
+
+
+def test_filing_that_always_times_out_is_given_up(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'to.sqlite'}")
+    with db.session() as s:
+        for i, hours in ((4, 1), (5, 2)):  # 4 is the newest
+            acc = f"000000000{i}-26-00000{i}"
+            s.add(
+                FilingRow(
+                    accession=acc,
+                    cik=i,
+                    ticker=f"T{i}",
+                    company="c",
+                    form="8-K",
+                    items="x",
+                    filed_date=date(2026, 11, 24),
+                    accepted_at=NOW - timedelta(hours=hours),
+                    ingested_at=NOW,
+                    url="u",
+                    analyzed=False,
+                )
+            )
+            s.add(FilingTextRow(accession=acc, text=TEXT))
+    caller = Clocked(cost=1, fail=TimeoutError("read timeout"), newest_only=True)
+    for _ in range(4):
+        analyze_recent_8k(db, FilingAnalyzer(caller), NOW, monotonic=caller.clock)
+    with db.session() as s:
+        assert s.get(FilingRow, "0000000004-26-000004").analyzed  # type: ignore[union-attr]  # given up
+        assert s.get(FilingRow, "0000000005-26-000005").analyzed  # type: ignore[union-attr]  # then reached
+
+
+def test_credential_errors_stop_batch_without_penalty(tmp_path: Path) -> None:
+    import anthropic
+    import httpx
+
     db = _two_filings(tmp_path)
-    ticks = iter([0.0, 0.0, 500.0, 500.0])
-    caller = FakeCaller({"relevant": False, "event_type": "other", "summary": "x"})
-    analyze_recent_8k(db, FilingAnalyzer(caller), NOW, budget_seconds=60, monotonic=lambda: next(ticks))
-    assert len(caller.calls) == 1  # second filing waits for the next cycle
+    resp = httpx.Response(401, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    err = anthropic.AuthenticationError("invalid x-api-key", response=resp, body=None)
+    for _ in range(5):
+        analyze_recent_8k(db, FilingAnalyzer(Raising(err)), NOW)
+    with db.session() as s:
+        assert not s.get(FilingRow, "0000000001-26-000001").analyzed  # type: ignore[union-attr]

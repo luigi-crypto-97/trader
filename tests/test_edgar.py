@@ -213,3 +213,27 @@ def test_sec_403_missing_file_vs_rate_limit() -> None:
     assert client.master_index(date(2026, 5, 25)) == []
     with pytest.raises(EdgarError):
         client.master_index(date(2026, 5, 26))
+
+
+def test_ingest_stops_at_deadline_and_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import trader.data.edgar.client as client_mod
+
+    clock = [0.0]
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: clock[0])
+    base = fake_sec()
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(".txt"):
+            clock[0] += 30.0  # each filing download takes 30 s
+        return base.handle_request(request)
+
+    db = Database(f"sqlite:///{tmp_path / 'dl.sqlite'}")
+    ing = EdgarIngestor(
+        mock_client(httpx.MockTransport(slow)), db, clock=lambda: datetime(2026, 11, 24, tzinfo=UTC)
+    )
+    entries = parse_master_index(read("master_sample.idx"))
+    first = ing.ingest_entries(entries, {"4", "8-K"}, deadline=45.0)
+    assert first.deferred >= 1 and first.stored + first.deferred == first.candidates
+    assert clock[0] <= 45.0 + 30.0  # at most one download in flight past the deadline
+    second = ing.ingest_entries(entries, {"4", "8-K"})
+    assert second.stored == first.deferred and second.deferred == 0

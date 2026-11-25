@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -67,7 +68,7 @@ class TelegramBot:
         self._token = token
         self.chat_id = chat_id
         self.db = db
-        self.http = http or httpx.Client(timeout=20.0)
+        self.http = http or httpx.Client(timeout=10.0)
 
     def _api(self, method: str, **params: Any) -> Any:
         try:
@@ -103,8 +104,9 @@ class TelegramBot:
         )
 
     # -------------------------------------------------------------- inbound
-    def process_updates(self, system: TradingSystem) -> int:
-        """Poll once (non-blocking) and handle button presses and commands. Returns handled count."""
+    def process_updates(self, system: TradingSystem, deadline: float | None = None) -> int:
+        """Poll once (non-blocking) and handle button presses and commands. Returns handled count.
+        With ``deadline`` (time.monotonic) remaining updates are left for the next poll."""
         offset = int(self.db.kv_get(OFFSET_KEY, 0))
         updates = (
             self._api("getUpdates", offset=offset, timeout=0, allowed_updates=["callback_query", "message"])
@@ -112,6 +114,8 @@ class TelegramBot:
         )
         handled = 0
         for upd in updates:
+            if deadline is not None and time.monotonic() >= deadline:
+                break  # not acknowledged: handled on the next poll
             # Acknowledge each update before handling it: a failing command (e.g. /status while the
             # broker is disconnected) must never block the ones after it, such as /kill.
             offset = max(offset, int(upd["update_id"]) + 1)

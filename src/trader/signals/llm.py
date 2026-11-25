@@ -32,6 +32,8 @@ from trader.domain import Signal
 log = logging.getLogger(__name__)
 
 SOURCE = "llm_8k"
+CALL_TIMEOUT = 120.0  # seconds, per API call
+MIN_CALL_SECONDS = 20.0  # do not start a call with less time than this left in the budget
 TRIAGE_CHARS = 20_000
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
@@ -56,6 +58,10 @@ class LlmError(RuntimeError):
 
 class LlmRefusal(LlmError):
     pass
+
+
+class OutOfTime(LlmError):
+    """The time budget does not allow another API call; the filing waits for the next cycle."""
 
 
 class TriageResult(BaseModel):
@@ -149,7 +155,15 @@ ANALYSIS_SYSTEM = (
 
 class JsonCaller(Protocol):
     def __call__(
-        self, *, model: str, system: str, user: str, schema: dict[str, Any], max_tokens: int, effort: str
+        self,
+        *,
+        model: str,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+        max_tokens: int,
+        effort: str,
+        timeout: float | None = None,
     ) -> tuple[dict[str, Any], dict[str, int]]: ...
 
 
@@ -165,11 +179,20 @@ class AnthropicJsonCaller:
             import anthropic
 
             # Explicit bounds: a hung API must never hold the process for the SDK default (600 s x 3).
-            client = anthropic.Anthropic(timeout=120.0, max_retries=1)
+            # No SDK retries: a failed call is retried on a later cycle, within its time budget.
+            client = anthropic.Anthropic(timeout=CALL_TIMEOUT, max_retries=0)
         self.client = client
 
     def __call__(
-        self, *, model: str, system: str, user: str, schema: dict[str, Any], max_tokens: int, effort: str
+        self,
+        *,
+        model: str,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+        max_tokens: int,
+        effort: str,
+        timeout: float | None = None,
     ) -> tuple[dict[str, Any], dict[str, int]]:
         kwargs: dict[str, Any] = {
             "model": model,
@@ -178,6 +201,8 @@ class AnthropicJsonCaller:
             "messages": [{"role": "user", "content": user}],
             "output_config": {"format": {"type": "json_schema", "schema": schema}, "effort": effort},
         }
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         if model.startswith("claude-haiku"):
             response = self.client.messages.create(**kwargs)
         else:
@@ -243,6 +268,18 @@ class FilingAnalyzer:
         self.max_chars = max_chars
         self.min_conviction = min_conviction
 
+    # Set by analyze_recent_8k: absolute monotonic deadline for the whole batch.
+    deadline: float | None = None
+    monotonic: Callable[[], float] = staticmethod(time.monotonic)
+
+    def _call_timeout(self) -> float:
+        if self.deadline is None:
+            return CALL_TIMEOUT
+        left = self.deadline - self.monotonic()
+        if left < MIN_CALL_SECONDS:
+            raise OutOfTime("time budget exhausted")
+        return min(CALL_TIMEOUT, left)
+
     @staticmethod
     def _header(f: FilingRow) -> str:
         return (
@@ -268,6 +305,7 @@ class FilingAnalyzer:
             schema=TRIAGE_SCHEMA,
             max_tokens=4000,
             effort="low",
+            timeout=self._call_timeout(),
         )
         usages = [usage]
         try:
@@ -287,6 +325,7 @@ class FilingAnalyzer:
             schema=ANALYSIS_SCHEMA,
             max_tokens=16000,
             effort=self.analysis_effort,
+            timeout=self._call_timeout(),
         )
         usages.append(usage)
         try:
@@ -330,19 +369,30 @@ class FilingAnalyzer:
         return AnalysisOutcome(acc, signal, "done", "BUY idea", usages)
 
 
-def _is_transient(exc: Exception) -> bool:
-    """API outages, overload, rate limits and timeouts: retry later without counting an attempt."""
-    if isinstance(exc, ConnectionError | TimeoutError):
-        return True
+def classify_error(exc: Exception) -> str:
+    """'budget' (no time left), 'timeout' (counts as an attempt, stop batch), 'outage' (API down or
+    rate-limited: stop, no penalty), 'config' (credentials/permissions: stop, no penalty) or
+    'permanent' (this filing is the problem: count an attempt, continue)."""
+    if isinstance(exc, OutOfTime):
+        return "budget"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, ConnectionError):
+        return "outage"
     try:
         import anthropic
     except ImportError:  # pragma: no cover
-        return False
-    if isinstance(exc, anthropic.APIConnectionError):  # includes timeouts
-        return True
+        return "permanent"
+    if isinstance(exc, anthropic.APITimeoutError):
+        return "timeout"
+    if isinstance(exc, anthropic.APIConnectionError):
+        return "outage"
     if isinstance(exc, anthropic.APIStatusError):
-        return exc.status_code in (408, 409, 429) or exc.status_code >= 500
-    return False
+        if exc.status_code in (401, 403):
+            return "config"
+        if exc.status_code in (408, 409, 429) or exc.status_code >= 500:
+            return "outage"
+    return "permanent"
 
 
 def analyze_recent_8k(
@@ -361,9 +411,11 @@ def analyze_recent_8k(
     """Analyze not-yet-analyzed 8-Ks of listed companies accepted within ``max_age``.
 
     * ``is_excluded`` (the private restricted list) filings are never sent to the model.
-    * The batch stops when ``budget_seconds`` is spent or on the first transient API error (the API
-      is down: try again next cycle without penalising the filings).
-    * A filing whose analysis fails for non-transient reasons is given up after ``max_attempts``.
+    * Hard time budget: no API call starts with less than MIN_CALL_SECONDS left and every call's
+      timeout is capped to the time left, so the batch ends within ``budget_seconds``.
+    * A timeout counts as an attempt for that filing (a filing that always times out is given up
+      after ``max_attempts``); outages and credential problems stop the batch without penalty;
+      other failures count an attempt and the batch continues.
     """
     with db.session() as s:
         candidates = list(
@@ -381,36 +433,45 @@ def analyze_recent_8k(
         )
     filings = [f for f in candidates if not (is_excluded and f.ticker and is_excluded(f.ticker))][:limit]
     signals: list[Signal] = []
-    started = monotonic()
-    for f in filings:
-        if monotonic() - started > budget_seconds:
-            log.info("LLM batch time budget spent; remaining filings wait for the next cycle")
-            break
-        with db.session() as s:
-            text_row = s.get(FilingTextRow, f.accession)
-        text = text_row.text if text_row else ""
-        attempts_key = f"llm_attempts:{f.accession}"
-        try:
-            outcome = analyzer.analyze(f, text, now)
-        except Exception as exc:
-            if _is_transient(exc):
-                log.warning("LLM API unavailable (%s): batch postponed", type(exc).__name__)
+    analyzer.deadline = monotonic() + budget_seconds
+    analyzer.monotonic = monotonic
+    try:
+        for f in filings:
+            with db.session() as s:
+                text_row = s.get(FilingTextRow, f.accession)
+            text = text_row.text if text_row else ""
+            attempts_key = f"llm_attempts:{f.accession}"
+            stop = False
+            try:
+                outcome = analyzer.analyze(f, text, now)
+            except Exception as exc:
+                kind = classify_error(exc)
+                if kind in {"budget", "outage", "config"}:
+                    level = logging.ERROR if kind == "config" else logging.INFO
+                    log.log(level, "LLM batch stopped (%s): %s", kind, exc)
+                    break
+                stop = kind == "timeout"
+                outcome = AnalysisOutcome(
+                    f.accession, None, "error", f"{type(exc).__name__}: {str(exc)[:500]}"
+                )
+            if on_outcome:  # before marking: a failing audit leaves the filing to be retried
+                on_outcome(outcome)
+            if outcome.stage == "error":
+                attempts = int(db.kv_get(attempts_key, 0)) + 1
+                db.kv_set(attempts_key, attempts)
+                done = attempts >= max_attempts
+            else:
+                done = True
+            if done:
+                with db.session() as s:
+                    row = s.get(FilingRow, f.accession)
+                    if row is not None:
+                        row.analyzed = True
+                db.kv_delete(attempts_key)
+            if outcome.signal is not None:
+                signals.append(outcome.signal)
+            if stop:
                 break
-            outcome = AnalysisOutcome(f.accession, None, "error", f"{type(exc).__name__}: {str(exc)[:500]}")
-        if outcome.stage == "error":
-            attempts = int(db.kv_get(attempts_key, 0)) + 1
-            db.kv_set(attempts_key, attempts)
-            done = attempts >= max_attempts
-        else:
-            done = True
-        with db.session() as s:
-            row = s.get(FilingRow, f.accession)
-            if row is not None and done:
-                row.analyzed = True
-        if done:
-            db.kv_delete(attempts_key)
-        if on_outcome:
-            on_outcome(outcome)
-        if outcome.signal is not None:
-            signals.append(outcome.signal)
+    finally:
+        analyzer.deadline = None
     return signals
