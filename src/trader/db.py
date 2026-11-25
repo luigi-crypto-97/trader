@@ -281,6 +281,12 @@ class Database:
                 row.value = dumps(value)
                 row.updated_at = now
 
+    def kv_delete(self, key: str) -> None:
+        with self.session() as s:
+            row = s.get(KVRow, key)
+            if row is not None:
+                s.delete(row)
+
     def latest_equity(self) -> EquitySnapshotRow | None:
         with self.session() as s:
             return s.scalars(select(EquitySnapshotRow).order_by(EquitySnapshotRow.ts.desc()).limit(1)).first()

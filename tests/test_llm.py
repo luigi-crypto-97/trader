@@ -175,34 +175,60 @@ def test_anthropic_caller_refusal_raises() -> None:
         caller(model="claude-opus-5-5", system="s", user="u", schema={}, max_tokens=10, effort="low")
 
 
-def test_batch_survives_api_errors_and_skips_private_tickers(tmp_path: Path) -> None:
+def _two_filings(tmp_path: Path) -> Database:
     db = Database(f"sqlite:///{tmp_path / 'b.sqlite'}")
     with db.session() as s:
         s.add(filing(ticker="SECRT", accession="0000000003-26-000003"))
         s.add(FilingTextRow(accession="0000000003-26-000003", text=TEXT))
         s.add(filing())
         s.add(FilingTextRow(accession="0000000001-26-000001", text=TEXT))
-    seen: list[str] = []
+    return db
 
-    class Down:
-        def __call__(self, **kw: Any) -> tuple[dict[str, Any], dict[str, int]]:
-            seen.append(kw["user"])
-            raise ConnectionError("overloaded")
 
+class Raising:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.users: list[str] = []
+
+    def __call__(self, **kw: Any) -> tuple[dict[str, Any], dict[str, int]]:
+        self.users.append(kw["user"])
+        raise self.exc
+
+
+def test_batch_gives_up_on_permanent_errors_and_skips_private_tickers(tmp_path: Path) -> None:
+    db = _two_filings(tmp_path)
+    caller = Raising(ValueError("bad request"))
     outcomes: list[str] = []
     for _ in range(3):
         assert (
             analyze_recent_8k(
                 db,
-                FilingAnalyzer(Down()),
+                FilingAnalyzer(caller),
                 NOW,
-                exclude_tickers=("SECRT",),
+                is_excluded=lambda t: t == "SECRT",
                 on_outcome=lambda o: outcomes.append(o.accession),
             )
             == []
         )
-    assert all("SECRT" not in u for u in seen)  # the private ticker never reaches the model
+    assert all("SECRT" not in u for u in caller.users)  # the private ticker never reaches the model
     assert outcomes == ["0000000001-26-000001"] * 3
     with db.session() as s:
         assert s.get(FilingRow, "0000000001-26-000001").analyzed  # type: ignore[union-attr]  # given up
-        assert not s.get(FilingRow, "0000000003-26-000003").analyzed  # type: ignore[union-attr]
+    assert db.kv_get("llm_attempts:0000000001-26-000001") is None  # counter cleaned up
+
+
+def test_batch_postponed_on_api_outage_without_penalty(tmp_path: Path) -> None:
+    db = _two_filings(tmp_path)
+    for _ in range(5):
+        analyze_recent_8k(db, FilingAnalyzer(Raising(ConnectionError("overloaded"))), NOW)
+    with db.session() as s:
+        assert not s.get(FilingRow, "0000000001-26-000001").analyzed  # type: ignore[union-attr]
+    assert db.kv_get("llm_attempts:0000000001-26-000001") is None
+
+
+def test_batch_respects_time_budget(tmp_path: Path) -> None:
+    db = _two_filings(tmp_path)
+    ticks = iter([0.0, 0.0, 500.0, 500.0])
+    caller = FakeCaller({"relevant": False, "event_type": "other", "summary": "x"})
+    analyze_recent_8k(db, FilingAnalyzer(caller), NOW, budget_seconds=60, monotonic=lambda: next(ticks))
+    assert len(caller.calls) == 1  # second filing waits for the next cycle

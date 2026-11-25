@@ -82,12 +82,12 @@ class Runtime:
         result = self.ingest(day=prev)
         # An empty or missing index (EDGAR answers 403 for files it does not have) is retried on the
         # next cycle instead of silently marking the day as complete.
-        # Filings that failed to download are retried too: the day is complete only without errors.
+        # Filings that failed to download are retried; parse errors are permanent and do not block.
         found = (
             int(str(result.get("candidates", 0) or 0)) > 0
             or int(str(result.get("already_stored", 0) or 0)) > 0
         )
-        if found and not result.get("errors"):
+        if found and not result.get("download_errors"):
             self.db.kv_set(DAILY_INGEST_KEY, today.isoformat())
         return result
 
@@ -126,7 +126,7 @@ class Runtime:
                 analyzer,
                 now,
                 on_outcome=self._record_llm_outcome,
-                exclude_tickers=self.limits.restricted,  # private list: never analysed, never logged
+                is_excluded=self.limits.is_restricted,  # private list: never sent to the model
             )
         tradable = [s for s in produced if not self.limits.is_restricted(s.ticker)]  # private list
         return [(s, self.system.submit_signal(s)) for s in tradable]

@@ -15,7 +15,7 @@ from datetime import UTC, date, datetime
 
 from sqlalchemy import select
 
-from trader.data.edgar.client import EdgarClient
+from trader.data.edgar.client import EdgarClient, EdgarError
 from trader.data.edgar.datasets import normalize_symbol
 from trader.data.edgar.form4 import OwnershipParseError, parse_ownership_xml
 from trader.data.edgar.index import IndexEntry
@@ -37,6 +37,7 @@ class IngestReport:
     stored: int = 0
     insider_rows: int = 0
     errors: list[str] = field(default_factory=list)
+    download_errors: int = 0  # transient: worth retrying (parse errors are permanent)
 
 
 class EdgarIngestor:
@@ -119,6 +120,8 @@ class EdgarIngestor:
         try:
             for acc, entry, outcome in results:
                 try:
+                    if isinstance(outcome, EdgarError):
+                        report.download_errors += 1
                     if isinstance(outcome, Exception):
                         raise outcome
                     report.fetched += 1

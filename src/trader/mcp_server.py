@@ -131,7 +131,6 @@ def build_server(lab: Lab | None = None) -> MCPServer:
                     "items": f.items,
                     "accepted_at": f.accepted_at.isoformat(),
                     "url": f.url,
-                    "llm_analyzed": f.analyzed,
                 }
                 for f in s.scalars(q)
             ]
@@ -228,7 +227,9 @@ def build_server(lab: Lab | None = None) -> MCPServer:
         def visible(r: dict[str, Any]) -> bool:
             # Records about privately dropped signals would let an agent infer the private list:
             # hide the drop itself and every record that refers to a signal that no longer exists.
-            if r["event"] == "signal.dropped":
+            # LLM analysis records and per-filing analysis flags are not exposed either: the private
+            # list is never analysed, so their absence would reveal it.
+            if r["event"] in {"signal.dropped", "llm.analysis"}:
                 return False
             payload = json.loads(r["payload"])
             ref = payload.get("signal_id") or (payload.get("id") if r["event"] == "signal.proposed" else None)

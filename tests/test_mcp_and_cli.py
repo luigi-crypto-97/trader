@@ -433,6 +433,9 @@ def test_cycle_still_exits_when_optional_phases_fail(cli_env: Path) -> None:
             raise ConnectionError("telegram unreachable")
 
     def llm_down(**_: object) -> list[object]:
+        # Slow/optional work runs only after the trading cycle: the stop exit is already sent.
+        sells = [o for o in rt.broker.orders.values() if o.request.side.value == "SELL"]  # type: ignore[attr-defined]
+        assert sells, "exit must be placed before signal generation"
         raise RuntimeError("anthropic 529 overloaded")
 
     rt.telegram = Broken()  # type: ignore[assignment]
@@ -474,3 +477,48 @@ def test_mcp_insider_screen_hides_private_tickers(tmp_path: Path) -> None:
                 )
             )
     assert call(build_server(lab), "insider_clusters") == []
+
+
+def test_mcp_cannot_tell_private_8k_from_others(tmp_path: Path) -> None:
+    from trader.audit import AuditLog
+    from trader.db import FilingRow, FilingTextRow
+    from trader.signals.llm import FilingAnalyzer, analyze_recent_8k
+
+    lab = Lab(settings(tmp_path))
+    now = datetime.now(UTC)
+    with lab.db.session() as s:
+        for acc, ticker in (("0000000001-26-000001", "ACME"), ("0000000002-26-000002", "SECRT")):
+            s.add(
+                FilingRow(
+                    accession=acc,
+                    cik=1,
+                    ticker=ticker,
+                    company=ticker,
+                    form="8-K",
+                    items="x",
+                    filed_date=now.date(),
+                    accepted_at=now - timedelta(hours=1),
+                    ingested_at=now,
+                    url="u",
+                    analyzed=False,
+                )
+            )
+            s.add(FilingTextRow(accession=acc, text="text"))
+
+    def caller(**kw: object) -> tuple[dict[str, object], dict[str, int]]:
+        return {"relevant": False, "event_type": "other", "summary": "routine"}, {}
+
+    audit = AuditLog(lab.db)
+    limits = lab.settings.risk_limits()
+    analyze_recent_8k(
+        lab.db,
+        FilingAnalyzer(caller),
+        now,
+        is_excluded=limits.is_restricted,
+        on_outcome=lambda o: audit.record("llm.analysis", {"accession": o.accession}),
+    )
+    server = build_server(lab)
+    filings = call(server, "recent_filings", {"form": "8-K"})
+    assert {tuple(sorted(f)) for f in filings} == {tuple(sorted(filings[0]))}  # identical shape
+    assert all("analyzed" not in json.dumps(f) for f in filings)
+    assert "0000000001-26-000001" not in json.dumps(call(server, "audit_tail", {"n": 200}))

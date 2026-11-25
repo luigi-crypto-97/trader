@@ -16,7 +16,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Callable, Collection
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -163,7 +164,8 @@ class AnthropicJsonCaller:
         if client is None:
             import anthropic
 
-            client = anthropic.Anthropic()
+            # Explicit bounds: a hung API must never hold the process for the SDK default (600 s x 3).
+            client = anthropic.Anthropic(timeout=120.0, max_retries=1)
         self.client = client
 
     def __call__(
@@ -328,6 +330,21 @@ class FilingAnalyzer:
         return AnalysisOutcome(acc, signal, "done", "BUY idea", usages)
 
 
+def _is_transient(exc: Exception) -> bool:
+    """API outages, overload, rate limits and timeouts: retry later without counting an attempt."""
+    if isinstance(exc, ConnectionError | TimeoutError):
+        return True
+    try:
+        import anthropic
+    except ImportError:  # pragma: no cover
+        return False
+    if isinstance(exc, anthropic.APIConnectionError):  # includes timeouts
+        return True
+    if isinstance(exc, anthropic.APIStatusError):
+        return exc.status_code in (408, 409, 429) or exc.status_code >= 500
+    return False
+
+
 def analyze_recent_8k(
     db: Database,
     analyzer: FilingAnalyzer,
@@ -336,16 +353,20 @@ def analyze_recent_8k(
     max_age: timedelta = timedelta(days=2),
     limit: int = 20,
     on_outcome: Callable[[AnalysisOutcome], None] | None = None,
-    exclude_tickers: Collection[str] = (),
+    is_excluded: Callable[[str], bool] | None = None,
     max_attempts: int = 3,
+    budget_seconds: float = 120.0,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> list[Signal]:
     """Analyze not-yet-analyzed 8-Ks of listed companies accepted within ``max_age``.
 
-    ``exclude_tickers`` (the private restricted list) are never sent to the model nor marked, so
-    they look exactly like filings that were not analyzed. A filing whose analysis keeps failing is
-    given up after ``max_attempts`` cycles."""
+    * ``is_excluded`` (the private restricted list) filings are never sent to the model.
+    * The batch stops when ``budget_seconds`` is spent or on the first transient API error (the API
+      is down: try again next cycle without penalising the filings).
+    * A filing whose analysis fails for non-transient reasons is given up after ``max_attempts``.
+    """
     with db.session() as s:
-        filings = list(
+        candidates = list(
             s.scalars(
                 select(FilingRow)
                 .where(
@@ -354,29 +375,40 @@ def analyze_recent_8k(
                     FilingRow.ticker.is_not(None),
                     FilingRow.accepted_at <= now,
                     FilingRow.accepted_at > now - max_age,
-                    FilingRow.ticker.not_in(list(exclude_tickers)),
                 )
                 .order_by(FilingRow.accepted_at.desc())
-                .limit(limit)
             )
         )
+    filings = [f for f in candidates if not (is_excluded and f.ticker and is_excluded(f.ticker))][:limit]
     signals: list[Signal] = []
+    started = monotonic()
     for f in filings:
+        if monotonic() - started > budget_seconds:
+            log.info("LLM batch time budget spent; remaining filings wait for the next cycle")
+            break
         with db.session() as s:
             text_row = s.get(FilingTextRow, f.accession)
         text = text_row.text if text_row else ""
+        attempts_key = f"llm_attempts:{f.accession}"
         try:
             outcome = analyzer.analyze(f, text, now)
-        except Exception as exc:  # API outages, bad requests, parsing: never stop the batch
+        except Exception as exc:
+            if _is_transient(exc):
+                log.warning("LLM API unavailable (%s): batch postponed", type(exc).__name__)
+                break
             outcome = AnalysisOutcome(f.accession, None, "error", f"{type(exc).__name__}: {str(exc)[:500]}")
-        attempts_key = f"llm_attempts:{f.accession}"
-        attempts = int(db.kv_get(attempts_key, 0)) + 1
         if outcome.stage == "error":
+            attempts = int(db.kv_get(attempts_key, 0)) + 1
             db.kv_set(attempts_key, attempts)
+            done = attempts >= max_attempts
+        else:
+            done = True
         with db.session() as s:
             row = s.get(FilingRow, f.accession)
-            if row is not None and (outcome.stage != "error" or attempts >= max_attempts):
+            if row is not None and done:
                 row.analyzed = True
+        if done:
+            db.kv_delete(attempts_key)
         if on_outcome:
             on_outcome(outcome)
         if outcome.signal is not None:

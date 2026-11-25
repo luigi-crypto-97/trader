@@ -155,7 +155,10 @@ class TelegramBot:
                     message_id=message["message_id"],
                     reply_markup={"inline_keyboard": []},
                 )
-        self.notify(f"Segnale {sid[:8]}: {verdict}")
+        try:
+            self.notify(f"Segnale {sid[:8]}: {verdict}")
+        except TelegramError as exc:  # the decision stands; never report it as a failed command
+            log.warning("verdict message not delivered: %s", exc)
         return 1
 
     def _on_message(self, msg: dict[str, Any], system: TradingSystem) -> int:

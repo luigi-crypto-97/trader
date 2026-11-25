@@ -96,7 +96,10 @@ class FailureAlerts:
             except Exception as again:
                 log.warning("reconnection failed: %s", again)
                 return rt  # still broken: the next cycle raises BrokerError and retries
-            fresh.audit.record("broker.reconnected", {"after": type(exc).__name__}, ts=fresh.clock())
+            try:
+                fresh.audit.record("broker.reconnected", {"after": type(exc).__name__}, ts=fresh.clock())
+            except Exception as audit_exc:
+                log.warning("could not audit the reconnection: %s", audit_exc)
             self._send(fresh, "Connessione al broker ripristinata.")
             return fresh
         return rt
@@ -295,16 +298,19 @@ def _one_cycle(rt: Runtime, *, ingest: bool, generate: bool) -> dict[str, Any]:
             log.warning("%s failed: %s", name, exc)
             out[f"{name}_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
 
+    # 1) human commands first (approvals, /kill), then 2) the trading cycle - sync, stop-loss and
+    # time exits, approved orders - and only afterwards 3) the slow optional work. New signals are
+    # reviewed on the next cycle, so a slow SEC or LLM call can never delay an exit.
     if rt.telegram is not None:
         telegram = rt.telegram
         optional("telegram_updates", lambda: telegram.process_updates(rt.system))
+    out["cycle"] = rt.system.run_cycle().__dict__
+    rt.save()
     if ingest and rt.settings.sec_user_agent:
         optional("daily_ingest", rt.ingest_previous_day_once)
         optional("ingest", lambda: {k: v for k, v in rt.ingest(latest=True).items() if k != "errors"})
     if generate:
         optional("new_signals", lambda: sum(1 for _, new in rt.generate_signals() if new))
-    out["cycle"] = rt.system.run_cycle().__dict__
-    rt.save()
     return out
 
 
@@ -330,21 +336,26 @@ def run(
     typer.echo(f"Avvio: broker={rt.broker.name}, approvazione={rt.settings.approval_mode}, ciclo={interval}s")
     next_cycle = 0.0
     alerts = FailureAlerts()
-    start_settings = rt.settings  # reconnections reuse the start configuration (no silent reload)
+    # Reconnections reuse the start environment settings; risk.yaml and the restricted list are
+    # re-read (a reconnection is audited).
+    start_settings = rt.settings
     try:
         while True:
             now = time.monotonic()
-            try:
-                if now >= next_cycle:
-                    next_cycle = now + interval
+            if now >= next_cycle:
+                next_cycle = now + interval
+                try:
                     log.info("cycle: %s", json.dumps(_one_cycle(rt, ingest=True, generate=True), default=str))
                     alerts.recovered(rt)
-                elif rt.telegram is not None:
+                except Exception as exc:
+                    log.exception("cycle failed; continuing")
+                    rt = alerts.failed(rt, exc, rebuild=partial(build_runtime, start_settings))
+                    next_cycle = now + min(interval, 60)  # retry the trading cycle soon
+            elif rt.telegram is not None:
+                try:  # between cycles: a Telegram outage only affects Telegram
                     rt.telegram.process_updates(rt.system)
-            except Exception as exc:
-                log.exception("cycle failed; continuing")
-                rt = alerts.failed(rt, exc, rebuild=partial(build_runtime, start_settings))
-                next_cycle = min(next_cycle, now + 60)  # retry soon after a failure
+                except Exception as exc:
+                    log.warning("telegram polling failed: %s", exc)
             time.sleep(poll)
     except KeyboardInterrupt:
         typer.echo("Arresto richiesto.")
