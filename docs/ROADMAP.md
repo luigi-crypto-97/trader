@@ -16,7 +16,10 @@
    verifica del segnale insider è fatto: esito negativo confermato.
 2. **Stop lato broker**: oggi stop e uscite a scadenza sono gestiti dal software durante la
    sessione. Prima del denaro reale, aggiungere ordini stop GTC presso IBKR, così la protezione
-   vale anche se il processo è fermo.
+   vale anche se il processo è fermo. Attenzione: oggi il sistema accetta solo ordini DAY perché
+   la chiusura d'ufficio degli ordini sconosciuti al broker si basa sulla loro scadenza a fine
+   sessione; gli stop GTC richiedono di salvare il `tif` di ogni ordine ed escludere i GTC da quella
+   riconciliazione (con revisione del `risk-guardian`).
 3. **Verifica dell'adapter IBKR sul conto paper**: saldo regolato, frazionarie, commissioni
    effettive, mappatura degli stati d'ordine.
 4. ~~Festività di borsa USA~~ (fatto: calendario NYSE con festività e chiusure anticipate).
