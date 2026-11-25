@@ -89,7 +89,11 @@ def test_mcp_propose_signal_queues_only(tmp_path: Path) -> None:
             "evidence": ["x"],
         },
     )
-    assert again["queued"] is False
+    assert again == {
+        "queued": False,
+        "signal_id": None,
+        "note": "not queued: already proposed today or not tradable",
+    }
     (sig,) = call(server, "list_signals", {"status": "PROPOSED"})
     assert sig["ticker"] == "ACME" and sig["source"] == "mcp_research"
     blocked = call(
@@ -104,7 +108,7 @@ def test_mcp_propose_signal_queues_only(tmp_path: Path) -> None:
             "evidence": ["x"],
         },
     )
-    assert blocked == {"queued": False, "error": "ticker not tradable"}
+    assert blocked == again  # restricted and duplicate are indistinguishable
     bad = call(
         server,
         "propose_signal",

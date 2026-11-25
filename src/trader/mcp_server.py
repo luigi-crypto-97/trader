@@ -22,6 +22,7 @@ from trader.config import Settings
 from trader.db import Database, FilingRow, FilingTextRow, InsiderTransactionRow, SignalRow
 from trader.domain import Signal, SignalStatus, normalize_ticker
 from trader.pipeline import KILL_SWITCH_KEY, LAST_ACCOUNT_KEY, signal_row_to_dict, submit_signal
+from trader.risk.engine import PRIVATE_RULE
 
 MAX_PROPOSALS_PER_DAY = 20
 
@@ -196,18 +197,20 @@ def build_server(lab: Lab | None = None) -> MCPServer:
             )
         except ValueError as exc:
             return {"queued": False, "error": str(exc)}
+        not_queued = {
+            "queued": False,
+            "signal_id": None,
+            "note": "not queued: already proposed today or not tradable",
+        }
         if lab.settings.risk_limits().is_restricted(signal.ticker):
-            lab.audit.record(
-                "mcp.restricted_attempt", {"note": "proposal for a non-tradable ticker refused"}, ts=now
-            )
-            return {"queued": False, "error": "ticker not tradable"}
-        created = submit_signal(lab.db, lab.audit, signal, now)
+            lab.audit.record("signal.dropped", {"reason": PRIVATE_RULE}, ts=now)
+            return not_queued
+        if not submit_signal(lab.db, lab.audit, signal, now):
+            return not_queued
         return {
-            "queued": created,
-            "signal_id": signal.id if created else None,
-            "note": "queued for sizing, risk check and human approval"
-            if created
-            else "an idea for this ticker was already proposed today",
+            "queued": True,
+            "signal_id": signal.id,
+            "note": "queued for sizing, risk check and human approval",
         }
 
     @server.tool(description="Last N audit-log records (hash-chained).")

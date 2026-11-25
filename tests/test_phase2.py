@@ -65,6 +65,7 @@ def make_zip(path: Path) -> Path:
 def test_normalize_symbol() -> None:
     assert normalize_symbol(" acme ") == "ACME"
     assert normalize_symbol("NYSE: BRK.B") == "BRK-B"
+    assert normalize_symbol("BRK B") == "BRK-B" and normalize_symbol("brk/b") == "BRK-B"
     assert normalize_symbol("NONE") is None and normalize_symbol("N/A") is None
     assert normalize_symbol("") is None
 
@@ -383,3 +384,15 @@ def test_split_pagination_refuses_foreign_host() -> None:
     )
     with pytest.raises(PriceDataError):
         client.splits(date(2025, 1, 1), date(2025, 2, 1))
+
+
+def test_redownloaded_range_drops_splits_removed_at_source(tmp_path: Path) -> None:
+    from trader.marketdata import Split
+
+    cache = PriceCache(tmp_path / "px")
+    wrong = Split("WRONG", date(2025, 3, 3), D("1"), D("2"))
+    keep = Split("KEEP", date(2024, 12, 5), D("1"), D("2"))
+    cache.write_splits([keep], date(2024, 12, 1), date(2024, 12, 31))
+    cache.write_splits([wrong], date(2025, 1, 1), date(2025, 6, 30))
+    cache.write_splits([], date(2025, 1, 1), date(2025, 6, 30))  # source no longer reports it
+    assert set(cache.read_splits(date(2024, 12, 2), date(2025, 6, 1))) == {"KEEP"}

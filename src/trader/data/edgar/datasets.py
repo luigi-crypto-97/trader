@@ -30,6 +30,7 @@ from sqlalchemy import insert, select
 from trader.broker.base import NEW_YORK
 from trader.data.edgar.client import WWW, EdgarClient
 from trader.db import Database, FilingRow, InsiderTransactionRow
+from trader.domain import normalize_ticker
 
 log = logging.getLogger(__name__)
 
@@ -46,9 +47,9 @@ def normalize_symbol(raw: str) -> str | None:
     s = raw.strip().upper()
     if ":" in s:  # e.g. "NASDAQ: ABCD"
         s = s.rsplit(":", 1)[1].strip()
-    if s.replace(".", "").replace("/", "") in {"NONE", "NA", "", "-", "--"}:
+    if s.replace(".", "").replace("/", "").replace(" ", "") in {"NONE", "NA", "", "-", "--"}:
         return None
-    s = s.replace(".", "-").replace("/", "-").replace(" ", "")
+    s = normalize_ticker(s)
     return s if _TICKER.match(s) else None
 
 

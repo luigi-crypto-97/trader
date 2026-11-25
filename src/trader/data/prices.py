@@ -215,7 +215,9 @@ class PriceCache:
             existing, coverage = self._load_split_file()
         except PriceDataError:
             existing, coverage = [], []
-        merged = {(x.ticker, x.execution_date): x for x in existing}
+        # The new list is complete for [start, end]: splits stored for that range but no longer
+        # reported by the source are dropped; splits outside it are kept.
+        merged = {(x.ticker, x.execution_date): x for x in existing if not start <= x.execution_date <= end}
         merged.update({(x.ticker, x.execution_date): x for x in splits})
         joined: list[tuple[date, date]] = []
         for a, b in sorted([*coverage, (start, end)]):  # union of covered date ranges

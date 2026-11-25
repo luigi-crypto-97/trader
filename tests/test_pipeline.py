@@ -163,8 +163,9 @@ def test_restricted_ticker_never_reaches_approval(tmp_path: Path) -> None:
     assert system_with([]).submit_signal(sig)  # queued before the list changed
     restricted = system_with(["ACME"])
     restricted.run_cycle()
-    s = restricted.get_signal(sig.id)
-    assert s is not None and s["status"] == "REJECTED_RISK" and s["status_reason"] == "private rule"
+    assert restricted.get_signal(sig.id) is None  # deleted: no row links the ticker to the list
+    dropped = [r for r in restricted.audit.tail(100) if r["event"] == "signal.dropped"]
+    assert dropped and all(sig.id not in r["payload"] and "ACME" not in r["payload"] for r in dropped)
 
 
 def test_outside_session_nothing_happens(env) -> None:  # type: ignore[no-untyped-def]
@@ -336,3 +337,95 @@ def test_restricted_signal_dropped_without_trace(tmp_path: Path) -> None:
     assert not system.submit_signal(make_signal("SECRT", key="p1"))
     assert system.list_signals() == []
     assert "SECRT" not in str(system.audit.tail(50))
+
+
+def big_limits() -> RiskLimits:
+    return RiskLimits(risk_per_trade_pct=D("0.1"), max_position_pct=D("0.6"))
+
+
+def test_committed_cash_blocks_second_order_and_shrinks_next_size(tmp_path: Path) -> None:
+    from trader.db import OrderRow
+
+    clock = Clock(NOW)
+    db = Database(f"sqlite:///{tmp_path / 'cash.sqlite'}")
+    broker = SimulatedBroker(settled_cash=D("1000"), clock=clock, slippage_bps=D("0"))
+    for t in ("ACME", "BETA", "GAMA"):
+        broker.set_quote(quote(t, "50", clock()))
+    system = TradingSystem(
+        db=db, broker=broker, limits=big_limits(), commissions=IbkrTieredUS(), audit=AuditLog(db), clock=clock
+    )
+    a, b = make_signal("ACME", key="ca"), make_signal("BETA", key="cb")
+    system.submit_signal(a)
+    system.submit_signal(b)
+    system.run_cycle()
+    assert system.decide(a.id, approve=True, actor="t")[0] and system.decide(b.id, approve=True, actor="t")[0]
+    clock.advance(minutes=1)
+    broker.set_quote(quote("ACME", "50.50", clock()))  # ACME limit no longer crosses: it rests
+    broker.set_quote(quote("BETA", "50", clock()))
+    system.run_cycle()
+    sa, sb = system.get_signal(a.id), system.get_signal(b.id)
+    assert sa is not None and sa["status"] == "ORDERED"
+    assert sb is not None and sb["status"] == "FAILED" and "settled_cash" in sb["status_reason"]
+
+    # A new proposal is sized on the cash not committed, without shrinking equity.
+    g = make_signal("GAMA", key="cg")
+    system.submit_signal(g)
+    clock.advance(minutes=1)
+    broker.set_quote(quote("GAMA", "50", clock()))
+    system.review_proposed(broker.account())
+    plan = system.get_signal(g.id)["plan"]["entry"]  # type: ignore[index]
+    assert plan["binding_constraint"] == "settled_cash"
+    assert D(plan["notional"]) <= D("1000") - system.risk_state().pending_total
+
+    # Exact commitment of a partially filled order: remaining qty x limit + commission.
+    with db.session() as s:
+        row = s.get(OrderRow, a.id)
+        assert row is not None and row.limit_price is not None
+        row.status, row.filled_qty = "PARTIALLY_FILLED", row.qty / 2
+        remaining, limit = row.qty - row.qty / 2, row.limit_price
+    expected = remaining * limit + IbkrTieredUS().estimate(remaining, limit)
+    assert system.risk_state().pending_buys == {"ACME": expected}
+
+
+def test_orders_unknown_to_broker_are_reconciled_next_day(tmp_path: Path) -> None:
+    from trader.db import OrderRow
+
+    clock = Clock(NOW)
+    db = Database(f"sqlite:///{tmp_path / 'rec.sqlite'}")
+    notifier = Recorder()
+    broker = SimulatedBroker(settled_cash=D("1000"), clock=clock)
+    system = TradingSystem(
+        db=db,
+        broker=broker,
+        limits=RiskLimits(),
+        commissions=IbkrTieredUS(),
+        audit=AuditLog(db),
+        notifier=notifier,
+        clock=clock,
+    )
+    with db.session() as s:
+        s.add(
+            OrderRow(
+                client_order_id="ghost",
+                signal_id=None,
+                purpose="EXIT_STOP",
+                ticker="ACME",
+                side="SELL",
+                qty=D("1"),
+                order_type="LIMIT",
+                limit_price=D("40"),
+                status="OPEN",
+                filled_qty=D("0"),
+                commission=D("0"),
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+    system.sync()
+    with db.session() as s:
+        assert s.get(OrderRow, "ghost").status == "OPEN"  # type: ignore[union-attr]  # same session: wait
+    clock.advance(days=1)
+    system.sync()
+    with db.session() as s:
+        assert s.get(OrderRow, "ghost").status == "CANCELLED"  # type: ignore[union-attr]
+    assert any("non più noto al broker" in m for m in notifier.messages)

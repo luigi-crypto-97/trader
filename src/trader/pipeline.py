@@ -238,6 +238,15 @@ class TradingSystem:
             return False
         return submit_signal(self.db, self.audit, signal, self.clock())
 
+    def _drop_private(self, signal_id: str) -> None:
+        """Remove a queued signal whose ticker is on the private list, leaving no ticker-to-list link
+        (the audit record carries neither the signal id nor the ticker)."""
+        with self.db.session() as s:
+            row = s.get(SignalRow, signal_id)
+            if row is not None:
+                s.delete(row)
+        self.audit.record("signal.dropped", {"reason": PRIVATE_RULE}, ts=self.clock())
+
     def _set_status(self, signal_id: str, status: SignalStatus, reason: str = "", **fields: Any) -> None:
         with self.db.session() as s:
             row = s.get(SignalRow, signal_id)
@@ -316,7 +325,7 @@ class TradingSystem:
                 self._set_status(row.id, SignalStatus.REJECTED_RISK, "only long entries are supported")
                 continue
             if self.limits.is_restricted(signal.ticker):
-                self._set_status(row.id, SignalStatus.REJECTED_RISK, PRIVATE_RULE)
+                self._drop_private(row.id)
                 continue
             quote = self.broker.quote(signal.ticker)
             if quote is None:
@@ -324,8 +333,12 @@ class TradingSystem:
                 continue
             # Size against cash not already committed to unfilled BUY orders.
             committed = self.risk_state().pending_total
+            usable = min(committed, account.settled_cash)
             sizing_account = account.model_copy(
-                update={"settled_cash": max(account.settled_cash - committed, Decimal("0"))}
+                update={
+                    "settled_cash": account.settled_cash - usable,
+                    "unsettled_cash": account.unsettled_cash + usable,  # equity unchanged
+                }
             )
             plan = plan_entry(signal, quote, sizing_account, self.limits, self.commissions)
             if isinstance(plan, SizingRejection):
@@ -403,6 +416,9 @@ class TradingSystem:
     def execute_approved(self, account: AccountSnapshot) -> int:
         executed = 0
         for row in self._rows(SignalStatus.APPROVED):
+            if self.limits.is_restricted(row.ticker):
+                self._drop_private(row.id)
+                continue
             plan = json.loads(row.plan).get("entry")
             if not plan:
                 self._set_status(row.id, SignalStatus.FAILED, "approved signal has no stored plan")
@@ -498,10 +514,29 @@ class TradingSystem:
                     )
                 )
             )
+        day_start = self._day_start()
         for coid in open_ids:
             result = self.broker.order_status(coid)
             if result is not None:
                 self._store_order_result(result)
+                continue
+            with self.db.session() as s:
+                row = s.get(OrderRow, coid)
+                stale = row is not None and row.created_at < day_start
+                if stale and row is not None:
+                    # All orders are DAY orders: one the broker no longer reports after its session ended
+                    # is gone. Keeping it OPEN would lock cash and, for a SELL, block the exit.
+                    row.status = OrderStatus.CANCELLED.value
+                    row.message = "unknown to broker after its session; reconciled as cancelled"
+                    row.updated_at = self.clock()
+                    ticker, side = row.ticker, row.side
+            if stale:
+                self.audit.record(
+                    "order.reconciled", {"client_order_id": coid, "status": "CANCELLED"}, ts=self.clock()
+                )
+                self.notifier.notify(
+                    f"ATTENZIONE: ordine {side} {ticker} non più noto al broker, chiuso d'ufficio"
+                )
 
         last = self.db.kv_get(LAST_FILL_KEY)
         since = datetime.fromisoformat(last) if last else None
