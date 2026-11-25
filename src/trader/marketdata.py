@@ -11,7 +11,7 @@ from datetime import date
 from decimal import Decimal
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Bar:
     day: date
     open: Decimal

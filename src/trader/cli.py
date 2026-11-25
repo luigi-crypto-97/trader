@@ -444,10 +444,9 @@ def research_insider(
     json_out: Path = Path("var/research/fase2-insider.json"),
 ) -> None:
     """Studio point-in-time del segnale insider: eventi, extra-rendimento vs SPY, portafoglio da 1.000 USD."""
-    from sqlalchemy import select
-
+    from trader.backtest.engine import replay_signals
     from trader.data.prices import PriceCache
-    from trader.db import Database, InsiderTransactionRow
+    from trader.db import Database
     from trader.research.insider_study import StudyConfig, default_variants, render_markdown, run_study
 
     _setup_logging()
@@ -458,17 +457,14 @@ def research_insider(
     )
     variants = default_variants(db)
     cache = PriceCache(s.massive_cache_dir)
-    # Load only the series that can ever produce a signal: issuers with open-market purchases.
-    with db.session() as sess:
-        tickers = {
-            t
-            for t in sess.scalars(
-                select(InsiderTransactionRow.ticker).where(InsiderTransactionRow.code == "P").distinct()
-            )
-            if t
-        }
+    # Trading calendar from the benchmark, then replay every variant once; only the tickers that
+    # actually produce signals are loaded (keeps memory small).
+    trading_days = sorted(cache.load({cfg.benchmark})[cfg.benchmark])
+    replay_days = [d for d in trading_days if cfg.start <= d <= cfg.end]
+    timed = {v.name: replay_signals(v.generator, replay_days) for v in variants}
+    tickers = {t.signal.ticker for signals in timed.values() for t in signals}
+    typer.echo(f"segnali: { {k: len(v) for k, v in timed.items()} }, titoli da caricare: {len(tickers)}")
     prices = cache.load(tickers | {cfg.benchmark})
-    trading_days = sorted(prices[cfg.benchmark])
     results = run_study(
         variants,
         trading_days,
@@ -476,6 +472,7 @@ def research_insider(
         cfg,
         limits=s.risk_limits(),
         splits=cache.read_splits(trading_days[0], trading_days[-1]),
+        timed_by_variant=timed,
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     json_out.parent.mkdir(parents=True, exist_ok=True)

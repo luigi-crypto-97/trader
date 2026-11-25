@@ -246,15 +246,19 @@ def run_study(
     limits: RiskLimits | None = None,
     portfolio_horizon_days: int = 28,
     splits: SplitMap | None = None,
+    timed_by_variant: dict[str, list[TimedSignal]] | None = None,
 ) -> dict[str, Any]:
+    """Run the pre-declared study. ``timed_by_variant`` lets the caller pass signals it already
+    replayed over the same days (they must come from the same generators)."""
     days = [d for d in trading_days if cfg.start <= d <= cfg.end]
     split_dt = datetime.combine(cfg.split, time(0), tzinfo=NEW_YORK).astimezone(UTC)
     builder = EventBuilder(prices, cfg, splits)
     results: dict[str, Any] = {"config": {k: str(v) for k, v in cfg.__dict__.items()}, "variants": {}}
-    timed_by_variant: dict[str, list[TimedSignal]] = {}
+    timed_by_variant = dict(timed_by_variant or {})
     for v in variants:
-        timed = replay_signals(v.generator, days)
-        timed_by_variant[v.name] = timed
+        if v.name not in timed_by_variant:
+            timed_by_variant[v.name] = replay_signals(v.generator, days)
+        timed = timed_by_variant[v.name]
         events, drops = builder.build(timed)
         ins = [e for e in events if e.available_at < split_dt]
         oos = [e for e in events if e.available_at >= split_dt]
