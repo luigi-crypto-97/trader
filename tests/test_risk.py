@@ -214,6 +214,17 @@ def test_tiny_order_blocked_by_commission_and_min_value(limits, make_quote, make
     assert {"min_order_value"} <= failed(d)
 
 
+def test_no_adding_to_open_position_unless_enabled(make_quote, make_account, now) -> None:  # type: ignore[no-untyped-def]
+    acct = make_account(positions={"ACME": ("1", "50")})
+    blocked = engine(RiskLimits()).evaluate(
+        buy(qty="0.5"), quote=make_quote(), account=acct, state=CLEAN, now=now
+    )
+    assert "no_add_to_position" in failed(blocked)
+    lim = RiskLimits(allow_add_to_position=True)
+    allowed = engine(lim).evaluate(buy(qty="0.5"), quote=make_quote(), account=acct, state=CLEAN, now=now)
+    assert "no_add_to_position" not in failed(allowed)
+
+
 # ------------------------------------------------------------------- exits
 
 
@@ -258,7 +269,7 @@ def test_load_risk_limits_with_restricted_file(tmp_path) -> None:  # type: ignor
     cfg = tmp_path / "risk.yaml"
     cfg.write_text("max_position_pct: 0.1\nrestricted: [aaa]\n")
     rl = tmp_path / "restricted.txt"
-    rl.write_text("# clients\nbbb  # comment\n\nccc\n")
+    rl.write_text("# private\nbbb  # comment\n\nccc\n")
     limits = load_risk_limits(cfg, rl)
     assert limits.max_position_pct == D("0.1")
     assert limits.restricted == ("AAA", "BBB", "CCC")

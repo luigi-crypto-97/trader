@@ -72,7 +72,23 @@ Apri il repository con Claude Code: il server MCP `trader` (`.mcp.json`) e gli a
 | Audit non integro | `uv run trader audit verify` → fermati e indaga prima di riprendere |
 | Riavvio | `uv run trader kill off --reason "..."` solo dopo aver capito la causa |
 
-## 8. Fisco (bozza)
+## 8. Ricerca (fase 2)
+
+Prezzi storici da **Massive** (ex Polygon.io), piano gratuito: 5 richieste/minuto, circa 2 anni di
+storico. La chiave va in `TRADER_MASSIVE_API_KEY` nel file `.env` ed è inviata come
+`Authorization: Bearer`; in un ambiente cloud con proxy che inietta la chiave, lasciala vuota.
+
+```bash
+uv run trader data insider-history 2024q4 2025q1 2025q2 2025q3 2025q4 2026q1   # archivi SEC Form 4
+uv run trader data prices 2024-12-02 2026-11-24                                  # prezzi giornalieri
+uv run trader research insider 2024-12-02 2026-03-31 --split 2025-08-01          # studio + report
+```
+
+I dati di ricerca stanno in `var/research.sqlite` e `var/cache/` (esclusi da git); il report va in
+`docs/research/`. Il protocollo (varianti, split, criterio di scelta) è fissato nel codice prima di
+vedere i risultati: non aggiungere varianti dopo averli visti.
+
+## 9. Fisco (bozza)
 
 `uv run trader tax 2026` produce plusvalenze e minusvalenze in euro (cambio BCE del giorno,
 costo medio ponderato, commissioni incluse) e una stima IVAFE con i periodi di detenzione per il

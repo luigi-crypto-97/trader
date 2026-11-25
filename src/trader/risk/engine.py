@@ -151,6 +151,12 @@ class RiskEngine:
 
         c.add("not_restricted", not lim.is_restricted(order.ticker), f"{order.ticker} restricted list check")
         c.add("in_universe", lim.in_universe(order.ticker), "whitelist check")
+        held = order.ticker in account.positions
+        c.add(
+            "no_add_to_position",
+            lim.allow_add_to_position or not held,
+            "position already open" if held else "new position",
+        )
         c.add(
             "orders_per_day",
             state.orders_today < lim.max_orders_per_day,

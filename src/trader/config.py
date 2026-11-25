@@ -26,6 +26,7 @@ class RiskLimits(BaseModel):
     risk_per_trade_pct: Decimal = Decimal("0.01")
     max_position_pct: Decimal = Decimal("0.12")
     max_positions: int = 10
+    allow_add_to_position: bool = False  # no pyramiding: one entry per open position
     max_gross_exposure_pct: Decimal = Decimal("1.0")
     min_conviction: Decimal = Decimal("0.5")
     default_stop_loss_pct: Decimal = Decimal("0.08")
@@ -164,6 +165,10 @@ class Settings(BaseSettings):
     telegram_chat_id: int | None = None
 
     sec_user_agent: str | None = None
+
+    research_db_url: str = Field(default=f"sqlite:///{PROJECT_ROOT / 'var' / 'research.sqlite'}")
+    massive_cache_dir: Path = PROJECT_ROOT / "var" / "cache" / "massive"
+    form345_cache_dir: Path = PROJECT_ROOT / "var" / "cache" / "form345"
 
     llm_enabled: bool = False
     llm_triage_model: str = "claude-haiku-5-5"

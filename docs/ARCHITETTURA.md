@@ -62,7 +62,7 @@ perdita o restricted list.
 
 - Server MCP senza connessione al broker e senza strumenti d'ordine; unica scrittura:
   `propose_signal` (accoda e basta).
-- La restricted list (clienti dello studio) non è esposta via MCP, log o git; `.claude/settings.json`
+- La restricted list (elenco personale) non è esposta via MCP, log o git; `.claude/settings.json`
   ne nega la lettura agli agenti.
 - Il testo dei filing è trattato come dato non affidabile (prompt injection) in tutti i prompt.
 - Dal telefono (Telegram) si può fermare il sistema (`/kill`) ma non riavviarlo: la riattivazione

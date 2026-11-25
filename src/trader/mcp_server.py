@@ -54,7 +54,7 @@ def build_server(lab: Lab | None = None) -> MCPServer:
             "kill_switch": lab.db.kv_get(KILL_SWITCH_KEY, {"on": False}),
             "last_account": lab.db.kv_get(LAST_ACCOUNT_KEY),
             "signals_by_status": counts,
-            # The restricted list is confidential (it reflects the firm's clients): expose only its size.
+            # The restricted list is private: expose only its size.
             "risk_limits": {
                 **json.loads(lab.settings.risk_limits().model_dump_json(exclude={"restricted"})),
                 "restricted_count": len(lab.settings.risk_limits().restricted),

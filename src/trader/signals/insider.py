@@ -32,6 +32,7 @@ class InsiderClusterParams:
     min_purchase_price: Decimal = Decimal("5")
     exclude_10b5_1: bool = True
     require_officer_or_director: bool = True
+    require_senior_buyer: bool = False  # at least one CEO/CFO/President/Chair among the buyers
     horizon_days: int = 60
     stop_loss_pct: Decimal = Decimal("0.10")
 
@@ -66,10 +67,14 @@ def find_insider_clusters(
                 )
             )
         )
-        urls = {
-            f.accession: f.url
-            for f in s.scalars(select(FilingRow).where(FilingRow.accession.in_({r.accession for r in rows})))
-        }
+        accessions = sorted({r.accession for r in rows})
+        urls: dict[str, str] = {}
+        for i in range(0, len(accessions), 900):  # stay below SQLite's bound-parameter limit
+            chunk = accessions[i : i + 900]
+            for acc, url in s.execute(
+                select(FilingRow.accession, FilingRow.url).where(FilingRow.accession.in_(chunk))
+            ):
+                urls[acc] = url
 
     by_ticker: dict[str, list[InsiderTransactionRow]] = defaultdict(list)
     for r in rows:
@@ -94,6 +99,8 @@ def find_insider_clusters(
         qualified = {k: b for k, b in buyers.items() if b.value >= p.min_insider_value}
         total = sum((b.value for b in qualified.values()), Decimal("0"))
         if len(qualified) < p.min_insiders or total < p.min_total_value:
+            continue
+        if p.require_senior_buyer and not any(b.senior for b in qualified.values()):
             continue
 
         latest = max(t.accepted_at for t in txs)

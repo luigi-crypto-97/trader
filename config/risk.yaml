@@ -6,6 +6,7 @@
 risk_per_trade_pct: 0.01        # perdita massima prevista per trade (entrata -> stop)
 max_position_pct: 0.12          # peso massimo di un singolo titolo
 max_positions: 10
+allow_add_to_position: false   # niente incrementi di posizioni già aperte
 max_gross_exposure_pct: 1.0     # conto cash: nessuna leva
 min_conviction: 0.5
 default_stop_loss_pct: 0.08

@@ -23,6 +23,10 @@ signals_app = typer.Typer(help="Segnali: genera, elenca, approva.", no_args_is_h
 ingest_app = typer.Typer(help="Acquisizione filing SEC EDGAR.", no_args_is_help=True)
 audit_app = typer.Typer(help="Registro di audit.", no_args_is_help=True)
 sim_app = typer.Typer(help="Strumenti per il broker simulato.", no_args_is_help=True)
+data_app = typer.Typer(help="Dati storici: prezzi (Massive) e archivi insider SEC.", no_args_is_help=True)
+research_app = typer.Typer(help="Studi di ricerca (fase 2).", no_args_is_help=True)
+app.add_typer(data_app, name="data")
+app.add_typer(research_app, name="research")
 app.add_typer(signals_app, name="signals")
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(audit_app, name="audit")
@@ -377,6 +381,88 @@ def backtest(
         )
     finally:
         rt.close()
+
+
+# ---------------------------------------------------------------------- data
+@data_app.command("prices")
+def data_prices(start: str, end: str) -> None:
+    """Scarica le barre giornaliere di tutte le azioni USA (Massive grouped daily), riprendibile.
+
+    Chiave: TRADER_MASSIVE_API_KEY (piano gratuito: 5 richieste/minuto, ~2 anni di storico)."""
+    from trader.data.prices import MassiveClient, PriceCache, backfill
+
+    _setup_logging()
+    s = Settings()
+    cache = PriceCache(s.massive_cache_dir)
+    n = backfill(
+        MassiveClient(),
+        cache,
+        date.fromisoformat(start),
+        date.fromisoformat(end),
+        on_progress=lambda d, k: typer.echo(f"{d}: {k} titoli"),
+    )
+    typer.echo(f"scaricati {n} giorni; in cache {len(cache.days())}")
+
+
+@data_app.command("insider-history")
+def data_insider_history(quarters: Annotated[list[str], typer.Argument(help="es. 2025q1 2025q2")]) -> None:
+    """Carica gli archivi trimestrali SEC dei Form 4 nel database di ricerca."""
+    from trader.data.edgar.client import EdgarClient
+    from trader.data.edgar.datasets import download_quarter, load_quarter
+    from trader.db import Database
+
+    _setup_logging()
+    s = Settings()
+    if not s.sec_user_agent:
+        raise typer.BadParameter("imposta TRADER_SEC_USER_AGENT")
+    client = EdgarClient(s.sec_user_agent)
+    db = Database(s.research_db_url)
+    for q in quarters:
+        report = load_quarter(db, download_quarter(client, q.lower(), s.form345_cache_dir))
+        _out(report.__dict__)
+
+
+# ------------------------------------------------------------------ research
+@research_app.command("insider")
+def research_insider(
+    start: str,
+    end: str,
+    split: Annotated[str, typer.Option(help="Inizio del periodo out-of-sample (YYYY-MM-DD)")],
+    out: Path = Path("docs/research/fase2-insider.md"),
+    json_out: Path = Path("var/research/fase2-insider.json"),
+) -> None:
+    """Studio point-in-time del segnale insider: eventi, extra-rendimento vs SPY, portafoglio da 1.000 USD."""
+    from sqlalchemy import select
+
+    from trader.data.prices import PriceCache
+    from trader.db import Database, InsiderTransactionRow
+    from trader.research.insider_study import StudyConfig, default_variants, render_markdown, run_study
+
+    _setup_logging()
+    s = Settings()
+    db = Database(s.research_db_url)
+    cfg = StudyConfig(
+        start=date.fromisoformat(start), end=date.fromisoformat(end), split=date.fromisoformat(split)
+    )
+    variants = default_variants(db)
+    cache = PriceCache(s.massive_cache_dir)
+    # Load only the series that can ever produce a signal: issuers with open-market purchases.
+    with db.session() as sess:
+        tickers = {
+            t
+            for t in sess.scalars(
+                select(InsiderTransactionRow.ticker).where(InsiderTransactionRow.code == "P").distinct()
+            )
+            if t
+        }
+    prices = cache.load(tickers | {cfg.benchmark})
+    trading_days = sorted(prices[cfg.benchmark])
+    results = run_study(variants, trading_days, prices, cfg, limits=s.risk_limits())
+    out.parent.mkdir(parents=True, exist_ok=True)
+    json_out.parent.mkdir(parents=True, exist_ok=True)
+    json_out.write_text(json.dumps(results, indent=2, default=str), encoding="utf-8")
+    out.write_text(render_markdown(results), encoding="utf-8")
+    typer.echo(f"report: {out}  dati: {json_out}  variante scelta: {results['chosen_variant']}")
 
 
 # ----------------------------------------------------------------------- sim

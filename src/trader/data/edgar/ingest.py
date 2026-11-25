@@ -15,6 +15,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import select
 
 from trader.data.edgar.client import EdgarClient
+from trader.data.edgar.datasets import normalize_symbol
 from trader.data.edgar.form4 import OwnershipParseError, parse_ownership_xml
 from trader.data.edgar.index import IndexEntry
 from trader.data.edgar.sgml import Submission, SubmissionParseError, html_to_text, parse_submission
@@ -64,8 +65,10 @@ class EdgarIngestor:
         return mapping
 
     # ----------------------------------------------------------------- ingest
-    def ingest_day(self, day: date, forms: Iterable[str] = SUPPORTED_FORMS) -> IngestReport:
-        return self.ingest_entries(self.client.master_index(day), forms)
+    def ingest_day(
+        self, day: date, forms: Iterable[str] = SUPPORTED_FORMS, tickers: dict[int, str] | None = None
+    ) -> IngestReport:
+        return self.ingest_entries(self.client.master_index(day), forms, tickers=tickers)
 
     def ingest_latest(self, forms: Iterable[str] = SUPPORTED_FORMS) -> IngestReport:
         entries: list[IndexEntry] = []
@@ -73,9 +76,13 @@ class EdgarIngestor:
             entries.extend(self.client.latest(form))
         return self.ingest_entries(entries, forms)
 
-    def ingest_entries(self, entries: Iterable[IndexEntry], forms: Iterable[str]) -> IngestReport:
+    def ingest_entries(
+        self, entries: Iterable[IndexEntry], forms: Iterable[str], *, tickers: dict[int, str] | None = None
+    ) -> IngestReport:
+        """``tickers`` (CIK -> ticker) overrides today's listing map, e.g. for historical backfills
+        that must include companies delisted since (no survivorship bias)."""
         wanted = set(forms) & SUPPORTED_FORMS
-        tickers = self.ticker_map()
+        tickers = tickers if tickers is not None else self.ticker_map()
         by_accession: dict[str, list[IndexEntry]] = {}
         for e in entries:
             if e.form in wanted:
@@ -116,7 +123,7 @@ class EdgarIngestor:
                 if not xml:
                     raise SubmissionParseError("Form 4 without XML document")
                 own = parse_ownership_xml(xml)
-                ticker = tickers.get(own.issuer_cik) or own.ticker or None
+                ticker = tickers.get(own.issuer_cik) or normalize_symbol(own.ticker)
                 s.add(
                     FilingRow(
                         accession=sub.accession,

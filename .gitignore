@@ -24,5 +24,5 @@ data/raw/
 .idea/
 .vscode/
 
-# Confidential: the restricted list reflects the firm's clients
+# Private: personal restricted list
 config/restricted_list.txt
