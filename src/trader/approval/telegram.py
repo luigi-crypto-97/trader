@@ -207,8 +207,7 @@ class TelegramBot:
             return 1
         if text == "/pending":
             pending = system.list_signals(SignalStatus.PENDING_APPROVAL)
-            if not pending:
-                self.notify("Nessun segnale in attesa.")
+            self.notify(f"Segnali in attesa: {len(pending)}." if pending else "Nessun segnale in attesa.")
             for s in pending:
                 if deadline is not None and time.monotonic() >= deadline:
                     break  # the rest is shown at the next /pending

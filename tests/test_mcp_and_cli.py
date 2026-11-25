@@ -591,3 +591,52 @@ def test_run_interval_validation_codes(cli_env: Path) -> None:
         ["--interval", "60", "--poll", "0"],
     ):
         assert runner.invoke(app, ["run", *args]).exit_code == 2
+
+
+def test_between_cycle_polling_respects_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    import trader.cli as cli_mod
+
+    clock = [1000.0]
+    starts: list[float] = []
+    polls: list[tuple[float, float]] = []  # (time left to next cycle at poll start, deadline)
+
+    class SlowTelegram:
+        def process_updates(self, system: object, deadline: float | None = None) -> int:
+            nxt = starts[-1] + 60 if starts else clock[0]
+            polls.append((nxt - clock[0], deadline or 0.0))
+            clock[0] = (deadline or clock[0]) + 2 * 5.0  # overruns its deadline by two calls
+            return 0
+
+        def notify(self, text: str) -> None:
+            return None
+
+    rt = SimpleNamespace(
+        telegram=SlowTelegram(),
+        system=None,
+        broker=SimpleNamespace(name="sim"),
+        settings=SimpleNamespace(approval_mode="manual"),
+        close=lambda: None,
+    )
+
+    def fake_cycle(
+        runtime: object, *, ingest: bool, generate: bool, deadline: float | None = None
+    ) -> dict[str, object]:
+        starts.append(clock[0])
+        clock[0] += 3.0
+        return {}
+
+    def fake_sleep(seconds: float) -> None:
+        if len(starts) >= 4:
+            raise KeyboardInterrupt
+        clock[0] += seconds
+
+    monkeypatch.setattr(cli_mod, "_rt", lambda: rt)
+    monkeypatch.setattr(cli_mod, "_one_cycle", fake_cycle)
+    monkeypatch.setattr(cli_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli_mod.time, "sleep", fake_sleep)
+    cli_mod.run(interval=60, poll=10)
+    assert polls and all(left >= cli_mod.POLL_GUARD for left, _ in polls)
+    gaps = [b - a for a, b in itertools.pairwise(starts)]
+    assert all(g <= 60 + 1 for g in gaps), gaps

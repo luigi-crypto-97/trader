@@ -368,3 +368,34 @@ def test_filing_never_fitting_budget_is_given_up(tmp_path: Path) -> None:
         analyze_recent_8k(db, FilingAnalyzer(caller), NOW, budget_seconds=60, monotonic=caller.clock)
     with db.session() as s:
         assert s.get(FilingRow, "0000000001-26-000001").analyzed  # type: ignore[union-attr]
+
+
+def test_capped_counter_cleared_after_success(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'clr.sqlite'}")
+    with db.session() as s:
+        s.add(filing())
+        s.add(FilingTextRow(accession="0000000001-26-000001", text=TEXT))
+    db.kv_set("llm_capped:0000000001-26-000001", 3)
+    analyze_recent_8k(
+        db, FilingAnalyzer(FakeCaller({"relevant": False, "event_type": "other", "summary": "x"})), NOW
+    )
+    assert db.kv_get("llm_capped:0000000001-26-000001") is None
+
+
+def test_timeout_object_matches_installed_sdk() -> None:
+    from anthropic._types import Timeout as SdkTimeout
+
+    from trader.signals.llm import sdk_timeout
+
+    t = sdk_timeout(42.0)
+    assert isinstance(t, SdkTimeout)  # the exact type the installed SDK accepts
+    assert t.connect == 5.0 and t.read == 42.0
+
+
+def test_caller_passes_timeout_to_sdk() -> None:
+    client = fake_client('{"relevant": true}')
+    AnthropicJsonCaller(client)(
+        model="claude-haiku-5-5", system="s", user="u", schema={}, max_tokens=10, effort="low", timeout=30.0
+    )
+    sent = client.messages.kwargs["timeout"]
+    assert sent.read == 30.0 and sent.connect == 5.0

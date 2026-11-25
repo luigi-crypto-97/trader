@@ -13,6 +13,7 @@ Design rules:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -168,6 +169,16 @@ class JsonCaller(Protocol):
     ) -> tuple[dict[str, Any], dict[str, int]]: ...
 
 
+def sdk_timeout(total: float) -> Any:
+    """Timeout object of the HTTP library the installed Anthropic SDK uses (httpx2 in SDK 2.x,
+    httpx before): connect phase capped at 5 s, the rest bounded by ``total``."""
+    try:
+        import httpx2 as http_lib
+    except ImportError:  # pragma: no cover - older SDKs
+        import httpx as http_lib  # type: ignore[no-redef]
+    return http_lib.Timeout(total, connect=min(5.0, total))
+
+
 class AnthropicJsonCaller:
     """Calls the Claude API with a JSON-schema constrained output.
 
@@ -203,7 +214,7 @@ class AnthropicJsonCaller:
             "output_config": {"format": {"type": "json_schema", "schema": schema}, "effort": effort},
         }
         if timeout is not None:
-            kwargs["timeout"] = timeout
+            kwargs["timeout"] = sdk_timeout(timeout)
         if model.startswith("claude-haiku"):
             response = self.client.messages.create(**kwargs)
         else:
@@ -464,6 +475,11 @@ def analyze_recent_8k(
                                 row.analyzed = True
                         db.kv_delete(capped_key)
                         log.warning("filing %s never fits the LLM time budget: given up", f.accession)
+                        if on_outcome:
+                            with contextlib.suppress(Exception):
+                                on_outcome(
+                                    AnalysisOutcome(f.accession, None, "error", "never fits the time budget")
+                                )
                     kind = "budget"
                 if kind in {"budget", "outage", "config"}:
                     level = logging.ERROR if kind == "config" else logging.INFO
@@ -493,6 +509,7 @@ def analyze_recent_8k(
                     if row is not None:
                         row.analyzed = True
                 db.kv_delete(attempts_key)
+                db.kv_delete(f"llm_capped:{f.accession}")
             if outcome.signal is not None:
                 signals.append(outcome.signal)
             if stop:

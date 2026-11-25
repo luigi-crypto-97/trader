@@ -80,7 +80,8 @@ class EdgarClient:
             left = None if deadline is None else deadline - time.monotonic()  # after throttling
             if left is not None and left <= 0:
                 raise EdgarDeferred(f"deadline reached before GET {url}")
-            timeout = REQUEST_TIMEOUT if left is None else max(1.0, min(REQUEST_TIMEOUT, left))
+            total = REQUEST_TIMEOUT if left is None else max(1.0, min(REQUEST_TIMEOUT, left))
+            timeout = httpx.Timeout(total, connect=min(5.0, total))
             try:
                 resp = self.http.get(url, headers=self.headers, timeout=timeout)
             except httpx.TransportError as exc:

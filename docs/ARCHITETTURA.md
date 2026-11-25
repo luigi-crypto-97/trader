@@ -100,9 +100,12 @@ ordini approvati) → acquisizione EDGAR e analisi LLM.
 | Acquisizione EDGAR e LLM | si fermano 10 s prima del ciclo successivo; il lavoro rimasto riprende al ciclo dopo |
 | Controlli Telegram tra un ciclo e l'altro | solo se mancano almeno 20 s al ciclo successivo; la pausa non supera mai l'ora del ciclo |
 
-Intervallo minimo: 60 s. I timeout HTTP valgono per fase di rete (connessione, lettura), non per
-l'intera risposta: un trasferimento molto lento può sforare di qualche secondo. Restano fuori da
-questi limiti l'I/O del broker durante il ciclo di trading e la risoluzione DNS.
+Intervallo minimo: 60 s. I timeout HTTP valgono per fase di rete: connessione al massimo 5 s, poi
+lettura limitata al tempo rimasto. Con una rete anomala (connessione lenta seguita da lettura
+lenta) acquisizione e LLM possono sforare la propria scadenza fino a circa 5 s oltre il margine di
+10 s. Restano fuori da questi limiti l'I/O del broker durante il ciclo di trading, le notifiche
+Telegram inviate durante il ciclo (fill, uscite, kill switch: fino a circa 10 s ciascuna) e la
+risoluzione DNS.
 
 Nota operativa: un `/kill` arrivato a scadenza già passata viene riapplicato al controllo
 successivo finché Telegram non lo conferma; se nel frattempo il kill switch è stato spento da CLI,
