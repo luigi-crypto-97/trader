@@ -262,3 +262,25 @@ def test_sim_broker_state_roundtrip() -> None:
     restored = SimulatedBroker.from_state(b.to_state(), clock=clock)
     assert restored.account() == b.account()
     assert restored.fills == b.fills
+
+
+def test_second_signal_on_same_ticker_blocked_while_first_order_pending(env) -> None:  # type: ignore[no-untyped-def]
+    system, broker, clock, _ = env
+    first, second = make_signal(key="k-a"), make_signal(key="k-b")
+    system.submit_signal(first)
+    system.submit_signal(second)
+    system.run_cycle()
+    assert system.decide(first.id, approve=True, actor="t")[0]
+    assert system.decide(second.id, approve=True, actor="t")[0]
+    # The market moves up 1%: the approved limit (ask + 0.2%) no longer crosses, the order rests.
+    clock.advance(minutes=1)
+    broker.set_quote(quote("ACME", "50.50", clock()))
+    report = system.run_cycle()
+    assert report.executed == 1
+    statuses = {system.get_signal(first.id)["status"], system.get_signal(second.id)["status"]}  # type: ignore[index]
+    assert statuses == {"ORDERED", "FAILED"}
+    failed = next(
+        s for s in (system.get_signal(first.id), system.get_signal(second.id)) if s["status"] == "FAILED"
+    )  # type: ignore[index]
+    assert "no_add_to_position" in failed["status_reason"]  # type: ignore[index]
+    assert len([o for o in broker.orders.values() if o.request.side.value == "BUY"]) == 1

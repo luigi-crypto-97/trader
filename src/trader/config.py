@@ -13,6 +13,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def normalize_ticker(ticker: str) -> str:
+    """Canonical SEC-style ticker: upper case, share class with '-' (BRK.B and BRK/B -> BRK-B)."""
+    return ticker.strip().upper().replace(".", "-").replace("/", "-").replace(" ", "")
+
+
 class RiskLimits(BaseModel):
     """Hard limits enforced by the deterministic risk engine.
 
@@ -66,7 +71,7 @@ class RiskLimits(BaseModel):
             return ()
         if not isinstance(v, list | tuple | set | frozenset):
             raise ValueError("expected a list of tickers")
-        return tuple(sorted({str(t).strip().upper() for t in v if str(t).strip()}))
+        return tuple(sorted({normalize_ticker(str(t)) for t in v if str(t).strip()}))
 
     @model_validator(mode="after")
     def _coherent(self) -> RiskLimits:
@@ -101,10 +106,10 @@ class RiskLimits(BaseModel):
         return self
 
     def is_restricted(self, ticker: str) -> bool:
-        return ticker.upper() in self.restricted
+        return normalize_ticker(ticker) in self.restricted
 
     def in_universe(self, ticker: str) -> bool:
-        return not self.whitelist or ticker.upper() in self.whitelist
+        return not self.whitelist or normalize_ticker(ticker) in self.whitelist
 
 
 def load_restricted_list(path: Path) -> tuple[str, ...]:
@@ -113,9 +118,9 @@ def load_restricted_list(path: Path) -> tuple[str, ...]:
         return ()
     tickers: set[str] = set()
     for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.split("#", 1)[0].strip().upper()
+        line = raw.split("#", 1)[0].strip()
         if line:
-            tickers.add(line)
+            tickers.add(normalize_ticker(line))
     return tuple(sorted(tickers))
 
 
@@ -167,7 +172,7 @@ class Settings(BaseSettings):
     sec_user_agent: str | None = None
 
     research_db_url: str = Field(default=f"sqlite:///{PROJECT_ROOT / 'var' / 'research.sqlite'}")
-    massive_cache_dir: Path = PROJECT_ROOT / "var" / "cache" / "massive"
+    massive_cache_dir: Path = PROJECT_ROOT / "var" / "cache" / "massive_raw"
     form345_cache_dir: Path = PROJECT_ROOT / "var" / "cache" / "form345"
 
     llm_enabled: bool = False

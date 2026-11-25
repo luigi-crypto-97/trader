@@ -98,3 +98,20 @@ def test_replay_and_csv_loader(tmp_path: Path) -> None:
 
     timed = replay_signals(gen, DAYS[:2])
     assert [t.available_at for t in timed] == [at(DAYS[0], 16), at(DAYS[1], 16)]
+
+
+def test_split_during_holding_is_applied_like_a_broker() -> None:
+    from trader.marketdata import Split
+
+    # Unadjusted prices: a 2-for-1 split on day 30 halves the price; economic value is unchanged.
+    acme = [50.0] * 30 + [25.0] * 30
+    bt = Backtester(
+        prices_with(acme), slippage_bps=D("0"), splits={"ACME": [Split("ACME", DAYS[30], D("1"), D("2"))]}
+    )
+    result = bt.run([TimedSignal(sig(horizon=20), at(DAYS[24], 17))], DAYS[0], DAYS[-1])
+    (trade,) = result.trades
+    assert trade.reason == "time"  # no false stop-loss on the split day
+    assert abs(trade.pnl) < D("1")  # only commissions, no fake -50%
+    without = Backtester(prices_with(acme), slippage_bps=D("0"))
+    (naive,) = without.run([TimedSignal(sig(horizon=20), at(DAYS[24], 17))], DAYS[0], DAYS[-1]).trades
+    assert naive.reason == "stop"  # what goes wrong when splits are ignored

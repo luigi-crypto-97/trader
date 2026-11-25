@@ -376,7 +376,8 @@ def backtest(
                 "metrics": result.metrics(),
                 "signals": len(timed),
                 "trades": len(result.trades),
-                "rejected_sample": result.rejected[:20],
+                # restricted-list rejections are omitted: the list is private
+                "rejected_sample": [r for r in result.rejected if "not_restricted" not in r[2]][:20],
             }
         )
     finally:
@@ -394,8 +395,10 @@ def data_prices(start: str, end: str) -> None:
     _setup_logging()
     s = Settings()
     cache = PriceCache(s.massive_cache_dir)
+    client = MassiveClient()
+    cache.write_splits(client.splits(date.fromisoformat(start), datetime.now(UTC).date()))
     n = backfill(
-        MassiveClient(),
+        client,
         cache,
         date.fromisoformat(start),
         date.fromisoformat(end),
@@ -457,7 +460,9 @@ def research_insider(
         }
     prices = cache.load(tickers | {cfg.benchmark})
     trading_days = sorted(prices[cfg.benchmark])
-    results = run_study(variants, trading_days, prices, cfg, limits=s.risk_limits())
+    results = run_study(
+        variants, trading_days, prices, cfg, limits=s.risk_limits(), splits=cache.read_splits()
+    )
     out.parent.mkdir(parents=True, exist_ok=True)
     json_out.parent.mkdir(parents=True, exist_ok=True)
     json_out.write_text(json.dumps(results, indent=2, default=str), encoding="utf-8")

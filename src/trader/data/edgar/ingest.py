@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 
@@ -46,11 +47,15 @@ class EdgarIngestor:
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         exchanges: frozenset[str] = LISTED_EXCHANGES,
+        workers: int = 1,
     ) -> None:
+        """``workers`` > 1 downloads filings concurrently; the client's shared throttle still caps
+        the total request rate, so this only hides network latency. Storage stays sequential."""
         self.client = client
         self.db = db
         self.clock = clock
         self.exchanges = exchanges
+        self.workers = max(1, workers)
 
     # ---------------------------------------------------------------- tickers
     def ticker_map(self) -> dict[int, str]:
@@ -93,20 +98,39 @@ class EdgarIngestor:
         with self.db.session() as s:
             known = set(s.scalars(select(FilingRow.accession).where(FilingRow.accession.in_(list(relevant)))))
         report.already_stored = len(known)
-        for acc, es in sorted(relevant.items()):
-            if acc in known:
-                continue
-            entry = next((e for e in es if e.cik in tickers), es[0])
+        todo = [
+            (acc, next((e for e in es if e.cik in tickers), es[0]))
+            for acc, es in sorted(relevant.items())
+            if acc not in known
+        ]
+
+        def fetch(item: tuple[str, IndexEntry]) -> tuple[str, IndexEntry, Submission | Exception]:
+            acc, entry = item
             try:
-                text = self.client.submission_text(entry.path)
-                report.fetched += 1
-                sub = parse_submission(text)
-                report.insider_rows += self.store(sub, entry, tickers)
-                report.stored += 1
-            except (SubmissionParseError, OwnershipParseError, ValueError, RuntimeError) as exc:
-                msg = f"{acc}: {exc}"
-                log.warning("ingest failed %s", msg)
-                report.errors.append(msg)
+                return acc, entry, parse_submission(self.client.submission_text(entry.path))
+            except (SubmissionParseError, ValueError, RuntimeError) as exc:
+                return acc, entry, exc
+
+        if self.workers == 1:
+            results: Iterable[tuple[str, IndexEntry, Submission | Exception]] = map(fetch, todo)
+        else:
+            pool = ThreadPoolExecutor(max_workers=self.workers)
+            results = pool.map(fetch, todo)
+        try:
+            for acc, entry, outcome in results:
+                try:
+                    if isinstance(outcome, Exception):
+                        raise outcome
+                    report.fetched += 1
+                    report.insider_rows += self.store(outcome, entry, tickers)
+                    report.stored += 1
+                except (SubmissionParseError, OwnershipParseError, ValueError, RuntimeError) as exc:
+                    msg = f"{acc}: {exc}"
+                    log.warning("ingest failed %s", msg)
+                    report.errors.append(msg)
+        finally:
+            if self.workers > 1:
+                pool.shutdown(wait=True)
         return report
 
     def store(self, sub: Submission, entry: IndexEntry, tickers: dict[int, str]) -> int:

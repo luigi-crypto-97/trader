@@ -277,3 +277,79 @@ def test_variant_point_in_time(tmp_path: Path) -> None:
     run_study([Variant("X", "x", gen)], DAYS, prices_fixture(), cfg)
     assert seen == [at_close(d) for d in DAYS[:10]]
     assert db is not None
+
+
+def test_event_returns_apply_splits_and_raw_price_filter() -> None:
+    from trader.marketdata import Split
+
+    raw_up = {d: Bar(d, D("40"), D("40"), D("40"), D("40"), D("1000000")) for d in DAYS[:50]}
+    raw_up.update({d: Bar(d, D("20"), D("20"), D("20"), D("20"), D("2000000")) for d in DAYS[50:]})
+    # A $2 stock that later does a 1-for-10 reverse split: adjusted data would show $20.
+    penny = {d: Bar(d, D("2"), D("2"), D("2"), D("2"), D("5000000")) for d in DAYS[:60]}
+    penny.update({d: Bar(d, D("20"), D("20"), D("20"), D("20"), D("500000")) for d in DAYS[60:]})
+    prices = {"SPY": flat(100), "UP": raw_up, "PENNY": penny}
+    splits = {
+        "UP": [Split("UP", DAYS[50], D("1"), D("2"))],
+        "PENNY": [Split("PENNY", DAYS[60], D("10"), D("1"))],
+    }
+    cfg = StudyConfig(start=DAYS[0], end=DAYS[-1], split=DAYS[90], horizons=(20,), primary_horizon=20)
+    events, drops = EventBuilder(prices, cfg, splits).build(
+        [TimedSignal(sig("UP", "1"), at_close(DAYS[40])), TimedSignal(sig("PENNY", "2"), at_close(DAYS[40]))]
+    )
+    assert [e.ticker for e in events] == ["UP"] and drops == {"below_min_price": 1}
+    assert events[0].returns[20][0] == pytest.approx(0.0)  # 40 -> 2 x 20: no fake -50%
+
+
+def test_in_sample_embargo_excludes_windows_crossing_split() -> None:
+    from trader.research.insider_study import report_block
+
+    cfg = StudyConfig(start=DAYS[0], end=DAYS[-1], split=DAYS[60], horizons=(5, 20), primary_horizon=20)
+    b = EventBuilder(prices_fixture(), cfg)
+    events, _ = b.build([TimedSignal(sig("UP", "1"), at_close(DAYS[50]))])  # 20-session exit after split
+    block = report_block(events, cfg, embargo_before=cfg.split)
+    assert block["h5"]["excess"]["n"] == 1  # exits on DAYS[55] < split
+    assert block["h20"]["excess"] == {"n": 0} and block["h20"]["embargoed"] == 1
+
+
+def test_massive_raw_bars_and_split_pagination(tmp_path: Path) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if "splits" in request.url.path:
+            if "cursor" in str(request.url):
+                return httpx.Response(
+                    200,
+                    json={
+                        "results": [
+                            {
+                                "ticker": "BRK.B",
+                                "execution_date": "2025-06-02",
+                                "split_from": 1,
+                                "split_to": 3,
+                            }
+                        ]
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"ticker": "ACME", "execution_date": "2025-03-03", "split_from": 10, "split_to": 1},
+                        {"ticker": "XYZpA", "execution_date": "2025-03-03", "split_from": 1, "split_to": 2},
+                    ],
+                    "next_url": "https://api.massive.com/v3/reference/splits?cursor=abc",
+                },
+            )
+        return httpx.Response(200, json=grouped_payload("x"))
+
+    client = MassiveClient(
+        api_key="", http=httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda s: None
+    )
+    client.grouped_daily(date(2025, 3, 7))
+    assert "adjusted=false" in seen[0]
+    splits = client.splits(date(2025, 1, 1), date(2025, 12, 31))
+    assert [(s.ticker, s.ratio) for s in splits] == [("ACME", D("0.1")), ("BRK-B", D("3"))]
+    cache = PriceCache(tmp_path / "px")
+    cache.write_splits(splits)
+    assert cache.read_splits()["BRK-B"][0].execution_date == date(2025, 6, 2)

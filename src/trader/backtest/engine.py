@@ -27,6 +27,7 @@ from trader.broker.base import NEW_YORK
 from trader.broker.commissions import CommissionModel, IbkrTieredUS
 from trader.config import RiskLimits
 from trader.domain import AccountSnapshot, OrderRequest, Position, Quote, Side, Signal
+from trader.marketdata import Bar, PriceData, SplitMap
 from trader.risk.engine import RiskEngine, RiskState
 from trader.risk.sizing import EntryPlan, plan_entry
 
@@ -34,21 +35,22 @@ BPS = Decimal("0.0001")
 OPEN_TIME = time(9, 30)
 
 
-@dataclass(frozen=True)
-class Bar:
-    day: date
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-    volume: Decimal
-
-
-PriceData = dict[str, dict[date, Bar]]
+__all__ = [
+    "BacktestResult",
+    "Backtester",
+    "Bar",
+    "PriceData",
+    "TimedSignal",
+    "Trade",
+    "load_csv_dir",
+    "replay_signals",
+]
 
 
 def load_csv_dir(directory: Path, tickers: Iterable[str] | None = None) -> PriceData:
-    """Load ``<TICKER>.csv`` files with columns date,open,high,low,close,volume (adjusted prices)."""
+    """Load ``<TICKER>.csv`` files with columns date,open,high,low,close,volume.
+
+    Use unadjusted prices together with ``splits``, or split-adjusted prices with no ``splits``."""
     wanted = {t.upper() for t in tickers} if tickers else None
     data: PriceData = {}
     for path in sorted(directory.glob("*.csv")):
@@ -160,8 +162,10 @@ class Backtester:
         slippage_bps: Decimal = Decimal("10"),
         benchmark: str = "SPY",
         adv_window: int = 20,
+        splits: SplitMap | None = None,
     ) -> None:
         self.prices = {t.upper(): bars for t, bars in prices.items()}
+        self.splits = splits or {}
         self.limits = limits or RiskLimits()
         self.commissions = commissions or IbkrTieredUS()
         self.risk = RiskEngine(self.limits, self.commissions)
@@ -226,6 +230,13 @@ class Backtester:
 
         for day in calendar:
             open_dt = datetime.combine(day, OPEN_TIME, tzinfo=NEW_YORK).astimezone(UTC)
+            # 0) corporate actions: splits executed today change share count and per-share prices
+            for p in positions.values():
+                for sp in self.splits.get(p.ticker, ()):
+                    if sp.execution_date == day:
+                        p.qty *= sp.ratio
+                        p.entry_price /= sp.ratio
+                        p.stop /= sp.ratio
             # 1) time exits at the open
             for p in list(positions.values()):
                 bar = self.prices[p.ticker].get(day)

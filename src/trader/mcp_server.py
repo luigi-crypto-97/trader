@@ -189,7 +189,9 @@ def build_server(lab: Lab | None = None) -> MCPServer:
         except ValueError as exc:
             return {"queued": False, "error": str(exc)}
         if lab.settings.risk_limits().is_restricted(signal.ticker):
-            lab.audit.record("mcp.restricted_attempt", {"ticker": signal.ticker}, ts=now)
+            lab.audit.record(
+                "mcp.restricted_attempt", {"note": "proposal for a non-tradable ticker refused"}, ts=now
+            )
             return {"queued": False, "error": "ticker not tradable"}
         created = submit_signal(lab.db, lab.audit, signal, now)
         return {

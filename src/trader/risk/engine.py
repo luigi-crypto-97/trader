@@ -28,6 +28,7 @@ class RiskState:
     orders_today: int
     start_of_day_equity: Decimal | None
     peak_equity: Decimal | None
+    pending_buys: frozenset[str] = frozenset()  # tickers with BUY orders sent but not yet filled
 
 
 @dataclass(frozen=True)
@@ -149,13 +150,14 @@ class RiskEngine:
         else:
             c.add("daily_loss_limit", True, "no start-of-day equity yet")
 
-        c.add("not_restricted", not lim.is_restricted(order.ticker), f"{order.ticker} restricted list check")
+        c.add("not_restricted", not lim.is_restricted(order.ticker), "restricted list check")
         c.add("in_universe", lim.in_universe(order.ticker), "whitelist check")
         held = order.ticker in account.positions
+        pending = order.ticker in state.pending_buys
         c.add(
             "no_add_to_position",
-            lim.allow_add_to_position or not held,
-            "position already open" if held else "new position",
+            lim.allow_add_to_position or not (held or pending),
+            "position already open" if held else "buy order already pending" if pending else "new position",
         )
         c.add(
             "orders_per_day",

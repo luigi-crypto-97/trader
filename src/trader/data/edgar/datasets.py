@@ -4,9 +4,11 @@ Quarterly ZIP files (``<YYYY>q<N>_form345.zip``) with the flattened XML of Forms
 Only original Form 4 filings are loaded (amendments 4/A are skipped to avoid double counting).
 
 Point-in-time: the data sets carry the *filing date*, not the acceptance time. ``accepted_at`` is
-set to 23:59:59 New York time of the filing date, which is never earlier than the real acceptance
-(EDGAR assigns the next business day's filing date to submissions accepted after 17:30 ET).
-Backtests therefore never see a filing before it was public; at worst they act one day late.
+set to 23:59:59 New York time of the filing date. Forms 3/4/5 submitted by 22:00 ET get that
+day's filing date (Regulation S-T, Rule 13(a)(4)); later submissions get the next business day,
+so the stored time is never earlier than the real acceptance and backtests act at worst one
+session late. Residual risk: filing-date adjustments granted by the SEC (Rule 13(b)) or hardship
+exemptions can, rarely, date a filing before its public dissemination.
 Filings already stored from the live EDGAR feed (exact acceptance time) are left untouched.
 """
 

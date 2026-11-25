@@ -280,3 +280,23 @@ def test_commission_model() -> None:
     assert m.estimate(D("1"), D("50")) == D("0.3530")  # min 0.35 + 0.003 third-party
     assert m.estimate(D("0.1"), D("50")) == D("0.0503")  # 1% cap (0.05) below the minimum
     assert m.estimate(D("1000"), D("50")) == D("6.5000")
+
+
+def test_pending_buy_blocks_second_entry_and_check_reported(make_quote, make_account, now) -> None:  # type: ignore[no-untyped-def]
+    eng = engine(RiskLimits())
+    pending = RiskState(False, 0, D("1000"), D("1000"), pending_buys=frozenset({"ACME"}))
+    d = eng.evaluate(buy(), quote=make_quote(), account=make_account(), state=pending, now=now)
+    assert "no_add_to_position" in failed(d)
+    fresh = eng.evaluate(buy(), quote=make_quote(), account=make_account(), state=CLEAN, now=now)
+    check = next(c for c in fresh.checks if c.name == "no_add_to_position")
+    assert check.passed and check.detail == "new position"
+
+
+def test_restricted_list_normalizes_share_classes(make_quote, make_account, now) -> None:  # type: ignore[no-untyped-def]
+    lim = RiskLimits(restricted=["BRK.B"])
+    assert lim.is_restricted("BRK-B") and lim.is_restricted("brk/b")
+    d = engine(lim).evaluate(
+        buy(ticker="BRK-B"), quote=make_quote(ticker="BRK-B"), account=make_account(), state=CLEAN, now=now
+    )
+    check = next(c for c in d.checks if c.name == "not_restricted")
+    assert not check.passed and "BRK" not in check.detail  # the private list is never echoed

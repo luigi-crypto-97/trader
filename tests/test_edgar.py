@@ -193,3 +193,11 @@ def test_live_sec_master_index() -> None:
     client = EdgarClient(os.environ.get("TRADER_SEC_USER_AGENT", "trader-test-suite"))
     entries = client.master_index(date(2026, 11, 23))
     assert any(e.form == "4" for e in entries)
+
+
+def test_ingest_concurrent_workers_same_result(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'w.sqlite'}")
+    now = datetime(2026, 11, 24, 12, tzinfo=UTC)
+    ing = EdgarIngestor(mock_client(fake_sec()), db, clock=lambda: now, workers=4)
+    report = ing.ingest_day(date(2026, 11, 23))
+    assert report.stored == 3 and report.insider_rows == 3 and not report.errors

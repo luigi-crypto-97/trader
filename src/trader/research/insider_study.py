@@ -29,6 +29,7 @@ from trader.broker.base import NEW_YORK
 from trader.config import RiskLimits
 from trader.db import Database
 from trader.domain import Signal
+from trader.marketdata import SplitMap, split_factor
 from trader.signals.insider import InsiderClusterParams, find_insider_clusters
 
 
@@ -61,6 +62,7 @@ class Event:
     adv: Decimal
     conviction: Decimal
     returns: dict[int, tuple[float, float]] = field(default_factory=dict)  # h -> (stock, bench)
+    exit_days: dict[int, date] = field(default_factory=dict)  # h -> scheduled exit session
     truncated: set[int] = field(default_factory=set)
 
     def excess(self, h: int) -> float | None:
@@ -99,9 +101,17 @@ def clustered_by_month(events: Sequence[Event], h: int) -> dict[str, float]:
 
 
 class EventBuilder:
-    def __init__(self, prices: PriceData, cfg: StudyConfig) -> None:
+    """Turns timed signals into events with forward returns.
+
+    ``prices`` must be *unadjusted* bars and ``splits`` the split list: each split executed after
+    the entry open and up to the exit close multiplies the shares held (no look-ahead: price
+    filters use the price actually traded on the entry day). With split-adjusted bars pass no splits.
+    """
+
+    def __init__(self, prices: PriceData, cfg: StudyConfig, splits: SplitMap | None = None) -> None:
         self.prices = prices
         self.cfg = cfg
+        self.splits = splits or {}
         bench = prices.get(cfg.benchmark)
         if not bench:
             raise ValueError(f"benchmark {cfg.benchmark} missing from price data")
@@ -165,23 +175,35 @@ class EventBuilder:
                 last_day = held[-1]
                 if last_day != exit_day:
                     ev.truncated.add(h)  # stopped trading: exit at last available close
-                stock = float(bars[last_day].close / price - 1)
-                b = float(bench[exit_day].close / bench[entry].open - 1)
+                shares = split_factor(self.splits.get(sig.ticker), entry, last_day)
+                bench_shares = split_factor(self.splits.get(cfg.benchmark), entry, exit_day)
+                stock = float(bars[last_day].close * shares / price - 1)
+                b = float(bench[exit_day].close * bench_shares / bench[entry].open - 1)
                 ev.returns[h] = (stock, b)
+                ev.exit_days[h] = exit_day
             events.append(ev)
         return events, dict(drops)
 
 
-def report_block(events: Sequence[Event], cfg: StudyConfig) -> dict[str, Any]:
+def report_block(
+    events: Sequence[Event], cfg: StudyConfig, *, embargo_before: date | None = None
+) -> dict[str, Any]:
+    """Statistics per horizon. With ``embargo_before`` (in-sample), an event counts at horizon h
+    only if its exit session is before that date, so no in-sample number uses later prices."""
     out: dict[str, Any] = {"events": len(events)}
     for h in cfg.horizons:
-        xs = [x for e in events if (x := e.excess(h)) is not None]
-        raw = [e.returns[h][0] for e in events if h in e.returns]
+        usable = [
+            e
+            for e in events
+            if h in e.returns and (embargo_before is None or e.exit_days[h] < embargo_before)
+        ]
+        xs = [x for e in usable if (x := e.excess(h)) is not None]
         out[f"h{h}"] = {
             "excess": summarize(xs),
-            "raw": summarize(raw),
-            **clustered_by_month(events, h),
-            "truncated": sum(1 for e in events if h in e.truncated),
+            "raw": summarize([e.returns[h][0] for e in usable]),
+            **clustered_by_month(usable, h),
+            "truncated": sum(1 for e in usable if h in e.truncated),
+            "embargoed": sum(1 for e in events if h in e.returns) - len(usable),
         }
     return out
 
@@ -223,10 +245,11 @@ def run_study(
     *,
     limits: RiskLimits | None = None,
     portfolio_horizon_days: int = 28,
+    splits: SplitMap | None = None,
 ) -> dict[str, Any]:
     days = [d for d in trading_days if cfg.start <= d <= cfg.end]
     split_dt = datetime.combine(cfg.split, time(0), tzinfo=NEW_YORK).astimezone(UTC)
-    builder = EventBuilder(prices, cfg)
+    builder = EventBuilder(prices, cfg, splits)
     results: dict[str, Any] = {"config": {k: str(v) for k, v in cfg.__dict__.items()}, "variants": {}}
     timed_by_variant: dict[str, list[TimedSignal]] = {}
     for v in variants:
@@ -239,7 +262,7 @@ def run_study(
             "description": v.description,
             "raw_signals": len(timed),
             "dropped": drops,
-            "in_sample": report_block(ins, cfg),
+            "in_sample": report_block(ins, cfg, embargo_before=cfg.split),
             "out_of_sample": report_block(oos, cfg),
         }
 
@@ -268,7 +291,9 @@ def run_study(
         last_price_day = max(
             d for d in builder.calendar if d <= hi + timedelta(days=portfolio_horizon_days * 2)
         )
-        bt = Backtester(prices, limits=limits, initial_cash=Decimal("1000"), benchmark=cfg.benchmark)
+        bt = Backtester(
+            prices, limits=limits, initial_cash=Decimal("1000"), benchmark=cfg.benchmark, splits=splits
+        )
         res = bt.run(sigs, lo, min(last_price_day, builder.calendar[-1]))
         portfolio[label] = {
             "metrics": res.metrics(),
@@ -366,9 +391,17 @@ def render_markdown(results: dict[str, Any]) -> str:
         )
     lines += [
         "",
-        "Limiti: costi e slippage inclusi solo nel portafoglio simulato (non nello studio per evento); "
-        "prezzi rettificati per split ma non per dividendi (anche per SPY); finestra di 2 anni; "
-        "il t mensile tratta i mesi come indipendenti.",
+        "Limiti dichiarati:",
+        "",
+        "- costi e slippage sono inclusi solo nel portafoglio simulato, non nello studio per evento;",
+        "- prezzi non rettificati con split applicati alla data di esecuzione (nessun look-ahead sui "
+        "filtri di prezzo); dividendi esclusi sia per i titoli sia per SPY;",
+        "- per i filing degli archivi trimestrali SEC la disponibilità è fissata alle 23:59 ET della "
+        "data di deposito (prudenziale: entrata al massimo un giorno dopo il reale); dai filing "
+        "acquisiti dal feed EDGAR si usa l'orario di accettazione esatto;",
+        "- in-sample con embargo: un evento conta a un orizzonte solo se l'uscita cade prima dello split;",
+        "- un cambio di ticker durante la detenzione chiude la finestra all'ultima chiusura disponibile;",
+        "- finestra di circa 2 anni; il t mensile tratta i mesi come indipendenti.",
         "",
     ]
     return "\n".join(lines)

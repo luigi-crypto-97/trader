@@ -201,6 +201,14 @@ class TradingSystem:
                 .limit(1)
             ).first()
             peak_rows = s.scalars(select(EquitySnapshotRow.equity)).all()
+            pending_buys = frozenset(
+                s.scalars(
+                    select(OrderRow.ticker).where(
+                        OrderRow.side == Side.BUY.value,
+                        OrderRow.status.in_([OrderStatus.OPEN.value, OrderStatus.PARTIALLY_FILLED.value]),
+                    )
+                )
+            )
             orders_today = s.scalar(
                 select(func.count())
                 .select_from(OrderRow)
@@ -211,6 +219,7 @@ class TradingSystem:
             orders_today=int(orders_today or 0),
             start_of_day_equity=first_today.equity if first_today else None,
             peak_equity=max(peak_rows) if peak_rows else None,
+            pending_buys=pending_buys,
         )
 
     # --------------------------------------------------------------- signals

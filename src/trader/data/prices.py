@@ -4,6 +4,11 @@ The *grouped daily* endpoint returns one bar for every US-listed stock on a give
 companies that were later delisted, so a backtest built on it has no survivorship bias.
 Free Basic plan: 5 requests/minute, ~2 years of history, data available after midnight ET.
 
+Bars are stored **unadjusted** (as traded that day) and stock splits are kept separately.
+Split-adjusted history would leak the future (a later reverse split makes a past 2 USD stock look
+like 20 USD) and would change every time a new split happens; with raw bars plus the split list,
+backtests apply each split on its execution date, exactly as a brokerage account does.
+
 Authentication: the API key is sent as ``Authorization: Bearer <key>``. Set
 ``TRADER_MASSIVE_API_KEY``; in a cloud session whose proxy injects the key, leave it unset.
 
@@ -14,6 +19,7 @@ warrants and units are dropped.
 from __future__ import annotations
 
 import gzip
+import json
 import logging
 import os
 import re
@@ -25,7 +31,7 @@ from pathlib import Path
 
 import httpx
 
-from trader.backtest.engine import Bar, PriceData
+from trader.marketdata import Bar, PriceData, Split, SplitMap
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +70,9 @@ class MassiveClient:
         self.monotonic = monotonic
         self._last = -1e9
 
-    def _get(self, url: str, params: dict[str, str]) -> dict[str, object]:
+    def _get(self, url: str, params: dict[str, str] | None) -> dict[str, object]:
+        """GET with throttling and retries. ``params=None`` keeps the URL's own query string
+        (httpx replaces the query when given a params mapping, even an empty one)."""
         for attempt in range(6):
             wait = self._last + self.min_interval - self.monotonic()
             if wait > 0:
@@ -92,9 +100,10 @@ class MassiveClient:
             return data
         raise PriceDataError(f"Massive request failed repeatedly: {url}")
 
-    def grouped_daily(self, day: date) -> dict[str, Bar]:
+    def grouped_daily(self, day: date, *, adjusted: bool = False) -> dict[str, Bar]:
         data = self._get(
-            f"{BASE_URL}/v2/aggs/grouped/locale/us/market/stocks/{day.isoformat()}", {"adjusted": "true"}
+            f"{BASE_URL}/v2/aggs/grouped/locale/us/market/stocks/{day.isoformat()}",
+            {"adjusted": "true" if adjusted else "false"},
         )
         results = data.get("results") or []
         assert isinstance(results, list)
@@ -112,6 +121,32 @@ class MassiveClient:
                 Decimal(str(r["v"])),
             )
         return bars
+
+    def splits(self, start: date, end: date) -> list[Split]:
+        """All stock splits with execution date in [start, end] (paginated)."""
+        out: list[Split] = []
+        url: str | None = f"{BASE_URL}/v3/reference/splits"
+        params: dict[str, str] | None = {
+            "execution_date.gte": start.isoformat(),
+            "execution_date.lte": end.isoformat(),
+            "limit": "1000",
+            "order": "asc",
+            "sort": "execution_date",
+        }
+        while url:
+            data = self._get(url, params)
+            results = data.get("results") or []
+            if not isinstance(results, list):
+                raise PriceDataError("unexpected splits payload")
+            for r in results:
+                ticker = massive_to_sec(str(r.get("ticker", "")))
+                frm, to = Decimal(str(r.get("split_from") or 0)), Decimal(str(r.get("split_to") or 0))
+                if ticker is None or frm <= 0 or to <= 0:
+                    continue
+                out.append(Split(ticker, date.fromisoformat(str(r["execution_date"])), frm, to))
+            nxt = data.get("next_url")
+            url, params = (str(nxt), None) if nxt else (None, None)  # next_url carries the cursor
+        return out
 
 
 class PriceCache:
@@ -146,6 +181,38 @@ class PriceCache:
 
     def days(self) -> list[date]:
         return sorted(date.fromisoformat(p.name.split(".")[0]) for p in self.dir.glob("*.csv.gz"))
+
+    @property
+    def splits_path(self) -> Path:
+        return self.dir / "splits.json"
+
+    def write_splits(self, splits: list[Split]) -> None:
+        payload = [
+            {
+                "ticker": x.ticker,
+                "execution_date": x.execution_date.isoformat(),
+                "split_from": str(x.split_from),
+                "split_to": str(x.split_to),
+            }
+            for x in splits
+        ]
+        self.splits_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def read_splits(self) -> SplitMap:
+        if not self.splits_path.exists():
+            raise PriceDataError("split list missing: run the splits download first")
+        out: SplitMap = {}
+        for r in json.loads(self.splits_path.read_text(encoding="utf-8")):
+            sp = Split(
+                r["ticker"],
+                date.fromisoformat(r["execution_date"]),
+                Decimal(r["split_from"]),
+                Decimal(r["split_to"]),
+            )
+            out.setdefault(sp.ticker, []).append(sp)
+        for v in out.values():
+            v.sort(key=lambda x: x.execution_date)
+        return out
 
     def load(
         self, tickers: Iterable[str] | None = None, start: date | None = None, end: date | None = None

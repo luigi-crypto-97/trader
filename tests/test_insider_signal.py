@@ -125,3 +125,25 @@ def test_point_in_time_and_lookback(tmp_path: Path) -> None:
     later = NOW + timedelta(minutes=2)
     assert [s.ticker for s in find_insider_clusters(db, later)] == ["FUT"]
     assert date(2026, 1, 1) < later.date()
+
+
+def test_dataset_timestamp_visible_only_from_next_session(tmp_path: Path) -> None:
+    from trader.broker.base import NEW_YORK
+    from trader.data.edgar.datasets import end_of_filing_day
+
+    db = db_at(tmp_path)
+    filed = date(2026, 11, 23)
+    for owner in (1, 2):
+        add_tx(
+            db,
+            acc=f"d{owner}",
+            ticker="DSET",
+            owner=owner,
+            shares="5000",
+            price="30",
+            accepted=end_of_filing_day(filed),
+        )
+    same_day_close = datetime(2026, 11, 23, 16, tzinfo=NEW_YORK).astimezone(UTC)
+    next_close = datetime(2026, 11, 24, 16, tzinfo=NEW_YORK).astimezone(UTC)
+    assert find_insider_clusters(db, same_day_close) == []
+    assert [s.ticker for s in find_insider_clusters(db, next_close)] == ["DSET"]
