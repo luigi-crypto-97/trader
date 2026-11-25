@@ -48,11 +48,17 @@ periodo.
   contaminato dalla conoscenza del modello (date anteriori al suo cutoff) ed è valido solo su
   dati successivi, cioè in forward test.
 
+## Secondo periodo di verifica (giu – nov 2026)
+
+Rieseguito senza cambiare varianti né selezione ([dettagli](fase2-holdout.md)): variante C a 20
+sedute −0,08% contro SPY; portafoglio da 1.000 USD −16,3% contro SPY −4,2%. **Esito confermato.**
+Il portafoglio perde anche quando il segnale è neutro: lo stop al 10% su titoli piccoli e volatili
+chiude in perdita la maggior parte delle operazioni.
+
 ## Raccomandazione
 
 1. **Non** passare alla fase 3 con questo segnale.
-2. Completare l'acquisizione dei Form 4 fino a novembre 2026 e rieseguire lo stesso protocollo
-   come secondo periodo di verifica, senza cambiare le varianti.
+2. ~~Secondo periodo di verifica~~ (fatto: esito confermato).
 3. Valutare nuove ipotesi **dichiarate prima** di guardare i dati (per esempio orizzonti più
    lunghi e confronto con un benchmark di pari dimensione), sapendo che ogni nuova prova
    aumenta il rischio di trovare un risultato casuale.

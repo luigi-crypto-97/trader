@@ -11,8 +11,9 @@
 
 ## Prossimi passi tecnici
 
-1. **Nuove ipotesi di segnale** dichiarate prima di guardare i dati, e secondo periodo di
-   verifica (giu – nov 2026) per il segnale insider con lo stesso protocollo.
+1. **Nuove ipotesi di segnale** dichiarate prima di guardare i dati e testate solo su dati futuri
+   (una è già dichiarata in [fase2-holdout.md](research/fase2-holdout.md)). Il secondo periodo di
+   verifica del segnale insider è fatto: esito negativo confermato.
 2. **Stop lato broker**: oggi stop e uscite a scadenza sono gestiti dal software durante la
    sessione. Prima del denaro reale, aggiungere ordini stop GTC presso IBKR, così la protezione
    vale anche se il processo è fermo.
