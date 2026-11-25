@@ -80,7 +80,13 @@ class Runtime:
         while prev.weekday() >= 5:
             prev -= timedelta(days=1)
         result = self.ingest(day=prev)
-        self.db.kv_set(DAILY_INGEST_KEY, today.isoformat())
+        # An empty or missing index (EDGAR answers 403 for files it does not have) is retried on the
+        # next cycle instead of silently marking the day as complete.
+        if (
+            int(str(result.get("candidates", 0) or 0)) > 0
+            or int(str(result.get("already_stored", 0) or 0)) > 0
+        ):
+            self.db.kv_set(DAILY_INGEST_KEY, today.isoformat())
         return result
 
     # ---------------------------------------------------------- signals

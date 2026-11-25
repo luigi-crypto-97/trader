@@ -221,12 +221,13 @@ def build_server(lab: Lab | None = None) -> MCPServer:
             live = set(s.scalars(select(SignalRow.id)))
 
         def visible(r: dict[str, Any]) -> bool:
-            # Records about privately dropped signals would let an agent infer the private list.
+            # Records about privately dropped signals would let an agent infer the private list:
+            # hide the drop itself and every record that refers to a signal that no longer exists.
             if r["event"] == "signal.dropped":
                 return False
-            if r["event"] == "signal.proposed":
-                return str(json.loads(r["payload"]).get("id")) in live
-            return True
+            payload = json.loads(r["payload"])
+            ref = payload.get("signal_id") or (payload.get("id") if r["event"] == "signal.proposed" else None)
+            return ref is None or str(ref) in live
 
         return [r for r in records if visible(r)][-n:]
 

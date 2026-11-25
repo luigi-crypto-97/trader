@@ -312,3 +312,73 @@ def test_mcp_audit_view_identical_for_duplicate_and_restricted(tmp_path: Path) -
     after_restricted = call(server, "audit_tail", {"n": 200})
     assert dup == restricted
     assert before == after_dup == after_restricted
+
+
+def test_mcp_hides_records_of_signals_dropped_at_execution(tmp_path: Path) -> None:
+    from trader.audit import AuditLog
+    from trader.broker.commissions import IbkrTieredUS
+    from trader.broker.simulated import SimulatedBroker
+    from trader.config import RiskLimits
+    from trader.domain import Quote, Signal
+    from trader.pipeline import TradingSystem
+    from trader.risk.engine import RiskEngine
+
+    lab = Lab(settings(tmp_path))
+    now = datetime(2026, 11, 24, 15, tzinfo=UTC)
+    broker = SimulatedBroker(settled_cash=D("1000"), clock=lambda: now)
+    broker.set_quote(
+        Quote(
+            ticker="LATER",
+            ts=now,
+            bid=D("49.99"),
+            ask=D("50.01"),
+            last=D("50"),
+            avg_daily_dollar_volume=D("100000000"),
+        )
+    )
+    system = TradingSystem(
+        db=lab.db,
+        broker=broker,
+        limits=RiskLimits(),
+        commissions=IbkrTieredUS(),
+        audit=AuditLog(lab.db),
+        clock=lambda: now,
+    )
+    sig = Signal(
+        source="insider_cluster",
+        ticker="LATER",
+        horizon_days=30,
+        conviction=D("0.8"),
+        stop_loss_pct=D("0.1"),
+        thesis="t",
+        dedup_key="late1",
+        created_at=now,
+    )
+    system.submit_signal(sig)
+    system.run_cycle()
+    system.decide(sig.id, approve=True, actor="t")
+    system.limits = RiskLimits(restricted=["LATER"])
+    system.risk = RiskEngine(system.limits, system.commissions)
+    system.run_cycle()
+    view = json.dumps(call(build_server(lab), "audit_tail", {"n": 200}))
+    assert sig.id not in view and "LATER" not in view
+
+
+def test_failure_alerts_notify_and_reconnect() -> None:
+    from types import SimpleNamespace
+
+    from trader.broker.base import BrokerError
+    from trader.cli import FailureAlerts
+
+    sent: list[str] = []
+    tg = SimpleNamespace(notify=sent.append)
+    old = SimpleNamespace(telegram=tg, close=lambda: None)
+    new = SimpleNamespace(telegram=tg, close=lambda: None)
+    t = [0.0]
+    alerts = FailureAlerts(every=1800, clock=lambda: t[0])
+    assert alerts.failed(old, RuntimeError("boom"), rebuild=lambda: new) is old  # type: ignore[arg-type]
+    assert alerts.failed(old, BrokerError("gateway down"), rebuild=lambda: new) is new  # type: ignore[arg-type]
+    assert sum("ciclo fallito" in m for m in sent) == 1  # throttled
+    assert any("ripristinata" in m for m in sent)
+    alerts.recovered(new)  # type: ignore[arg-type]
+    assert sent[-1] == "Ciclo di nuovo regolare."

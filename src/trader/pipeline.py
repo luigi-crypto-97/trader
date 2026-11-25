@@ -27,7 +27,7 @@ from typing import Any, Literal, Protocol
 from sqlalchemy import func, select
 
 from trader.audit import AuditLog
-from trader.broker.base import NEW_YORK, Broker, is_regular_session
+from trader.broker.base import NEW_YORK, Broker, BrokerError, is_regular_session
 from trader.broker.calendar import first_session_close_after
 from trader.broker.commissions import CommissionModel
 from trader.config import RiskLimits
@@ -498,12 +498,22 @@ class TradingSystem:
         self.audit.record("order.submit", {"purpose": purpose, **order.model_dump(mode="json")}, ts=now)
         try:
             result = self.broker.place(order)
-        except Exception as exc:
+        except BrokerError as exc:  # by contract: raised only when the order was certainly not sent
             result = OrderResult(
                 client_order_id=order.client_order_id,
                 broker_order_id=None,
                 status=OrderStatus.REJECTED,
                 message=f"broker error: {exc}",
+            )
+        except Exception as exc:
+            # The order may have reached the broker: keep it OPEN (cash committed, no second SELL)
+            # and let sync() verify it, reconciling only after its session has closed.
+            log.error("order %s submission outcome unknown: %s", order.client_order_id, exc)
+            result = OrderResult(
+                client_order_id=order.client_order_id,
+                broker_order_id=None,
+                status=OrderStatus.OPEN,
+                message=f"submission outcome unknown, to be verified: {exc}",
             )
         self._store_order_result(result)
         self.audit.record("order.result", result.model_dump(mode="json"), ts=self.clock())

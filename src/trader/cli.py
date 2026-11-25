@@ -53,6 +53,57 @@ def public_rejections(rejected: list[tuple[date, str, str]]) -> list[tuple[date,
     return [r for r in rejected if PRIVATE_RULE not in r[2]]
 
 
+class FailureAlerts:
+    """Makes failing cycles visible: Telegram alert (at most every 30 minutes) and, when the broker
+    connection is lost, a fresh connection. A silent loop would also skip stop-loss exits."""
+
+    def __init__(self, every: float = 1800.0, clock: Any = time.monotonic) -> None:
+        self.every = every
+        self.clock = clock
+        self.last_alert: float | None = None
+        self.failing = False
+
+    def _send(self, rt: Runtime, text: str) -> None:
+        if rt.telegram is None:
+            return
+        try:
+            rt.telegram.notify(text)
+        except Exception as exc:
+            log.warning("alert not delivered: %s", exc)
+
+    def failed(self, rt: Runtime, exc: Exception, rebuild: Any) -> Runtime:
+        from trader.broker.base import BrokerError
+
+        self.failing = True
+        now = self.clock()
+        if self.last_alert is None or now - self.last_alert >= self.every:
+            self.last_alert = now
+            self._send(
+                rt,
+                f"ATTENZIONE: ciclo fallito ({type(exc).__name__}: {str(exc)[:200]}). "
+                "Uscite e ingressi sospesi finché il problema persiste.",
+            )
+        if isinstance(exc, BrokerError):
+            try:
+                fresh: Runtime = rebuild()
+            except Exception as again:
+                log.warning("reconnection failed: %s", again)
+                return rt
+            try:
+                rt.close()
+            except Exception as close_exc:
+                log.warning("closing the old connection failed: %s", close_exc)
+            self._send(fresh, "Connessione al broker ripristinata.")
+            return fresh
+        return rt
+
+    def recovered(self, rt: Runtime) -> None:
+        if self.failing:
+            self.failing = False
+            self.last_alert = None
+            self._send(rt, "Ciclo di nuovo regolare.")
+
+
 def _rt() -> Runtime:
     return build_runtime(Settings())
 
@@ -267,17 +318,21 @@ def run(
     rt = _rt()
     typer.echo(f"Avvio: broker={rt.broker.name}, approvazione={rt.settings.approval_mode}, ciclo={interval}s")
     next_cycle = 0.0
+    alerts = FailureAlerts()
     try:
         while True:
             now = time.monotonic()
             try:
                 if now >= next_cycle:
-                    log.info("cycle: %s", json.dumps(_one_cycle(rt, ingest=True, generate=True), default=str))
                     next_cycle = now + interval
+                    log.info("cycle: %s", json.dumps(_one_cycle(rt, ingest=True, generate=True), default=str))
+                    alerts.recovered(rt)
                 elif rt.telegram is not None:
                     rt.telegram.process_updates(rt.system)
-            except Exception:
+            except Exception as exc:
                 log.exception("cycle failed; continuing")
+                rt = alerts.failed(rt, exc, rebuild=_rt)
+                next_cycle = min(next_cycle, now + 60)  # retry soon after a failure
             time.sleep(poll)
     except KeyboardInterrupt:
         typer.echo("Arresto richiesto.")

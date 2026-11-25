@@ -130,3 +130,19 @@ def test_format_pending_truncates_long_thesis() -> None:
     }
     text = format_pending(sig)
     assert len(text) < 2000 and "https://www.sec.gov/a" in text
+
+
+def test_kill_processed_even_if_an_earlier_command_fails(tmp_path: Path) -> None:
+    system, bot, fake = setup(tmp_path)
+
+    def broken_status() -> dict[str, object]:
+        raise RuntimeError("IB Gateway not connected")
+
+    system.status = broken_status  # type: ignore[method-assign]
+    fake.updates = [
+        {"update_id": 10, "message": {"chat": {"id": CHAT}, "text": "/status"}},
+        {"update_id": 11, "message": {"chat": {"id": CHAT}, "text": "/kill"}},
+    ]
+    bot.process_updates(system)
+    assert system.kill_switch_on()
+    assert bot.process_updates(system) == 0  # both acknowledged: nothing is reprocessed

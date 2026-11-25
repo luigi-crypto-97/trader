@@ -13,7 +13,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -155,7 +155,8 @@ class OrderRequest(_Model):
     qty: Decimal
     order_type: OrderType = OrderType.LIMIT
     limit_price: Decimal | None = None
-    tif: str = "DAY"
+    # Only DAY orders: order reconciliation relies on orders expiring at the end of their session.
+    tif: Literal["DAY"] = "DAY"
 
     @field_validator("qty")
     @classmethod

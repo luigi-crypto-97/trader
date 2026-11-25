@@ -60,7 +60,7 @@ def easter(year: int) -> date:
     return date(year, month, day + 1)
 
 
-def _observed(d: date) -> date | None:
+def _observed(d: date) -> date:
     if d.weekday() == 5:
         return d - timedelta(days=1)
     if d.weekday() == 6:
@@ -81,17 +81,11 @@ def holidays(year: int) -> frozenset[date]:
     out.add(easter(year) - timedelta(days=2))  # Good Friday
     out.add(_last_weekday(year, 5, 0))  # Memorial Day
     if year >= 2022:
-        jt = _observed(date(year, 6, 19))
-        if jt is not None:
-            out.add(jt)
-    ind = _observed(date(year, 7, 4))
-    if ind is not None:
-        out.add(ind)
+        out.add(_observed(date(year, 6, 19)))
+    out.add(_observed(date(year, 7, 4)))
     out.add(_nth_weekday(year, 9, 0, 1))  # Labor Day
     out.add(_nth_weekday(year, 11, 3, 4))  # Thanksgiving
-    xmas = _observed(date(year, 12, 25))
-    if xmas is not None:
-        out.add(xmas)
+    out.add(_observed(date(year, 12, 25)))
     out |= {d for d in SPECIAL_CLOSURES if d.year == year}
     return frozenset(out)
 

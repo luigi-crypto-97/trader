@@ -10,6 +10,7 @@ Security model:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -111,15 +112,19 @@ class TelegramBot:
         )
         handled = 0
         for upd in updates:
+            # Acknowledge each update before handling it: a failing command (e.g. /status while the
+            # broker is disconnected) must never block the ones after it, such as /kill.
             offset = max(offset, int(upd["update_id"]) + 1)
+            self.db.kv_set(OFFSET_KEY, offset)
             try:
                 if "callback_query" in upd:
                     handled += self._on_callback(upd["callback_query"], system)
                 elif "message" in upd:
                     handled += self._on_message(upd["message"], system)
-            except TelegramError as exc:
-                log.warning("telegram handling failed: %s", exc)
-        self.db.kv_set(OFFSET_KEY, offset)
+            except Exception as exc:
+                log.warning("telegram update %s failed: %s", upd.get("update_id"), exc)
+                with contextlib.suppress(TelegramError):
+                    self.notify(f"Comando non eseguito: {type(exc).__name__}: {str(exc)[:200]}")
         return handled
 
     def _authorized(self, chat: dict[str, Any] | None) -> bool:

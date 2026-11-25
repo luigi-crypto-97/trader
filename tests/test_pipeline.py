@@ -549,3 +549,60 @@ def test_signal_dropped_at_execution_when_ticker_becomes_restricted(env) -> None
     report = system.run_cycle()
     assert report.executed == 0 and system.get_signal(sig.id) is None
     assert not [r for r in system.audit.tail(200) if r["event"] == "order.submit"]
+
+
+class FlakyPlaceBroker(SimulatedBroker):
+    """Accepts the order, then the connection drops before the reply arrives."""
+
+    def place(self, order: OrderRequest):  # type: ignore[no-untyped-def]
+        super().place(order)
+        raise ConnectionError("socket closed after submit")
+
+
+def test_uncertain_submission_stays_open_and_blocks_a_second_sell(tmp_path: Path) -> None:
+    from trader.broker.base import BrokerError
+
+    clock = Clock(NOW)
+    db = Database(f"sqlite:///{tmp_path / 'flaky.sqlite'}")
+    broker = FlakyPlaceBroker(settled_cash=D("1000"), clock=clock)
+    broker.set_quote(quote("ACME", "50", clock()))
+    system = TradingSystem(
+        db=db, broker=broker, limits=RiskLimits(), commissions=IbkrTieredUS(), audit=AuditLog(db), clock=clock
+    )
+    sell = OrderRequest(ticker="ACME", side=Side.SELL, qty=D("1"), limit_price=D("49"))
+    result = system._place(sell, purpose="EXIT_STOP", signal_id=None)
+    assert result.status is OrderStatus.OPEN and "unknown" in result.message
+    assert system.risk_state().pending_sells.get("ACME") == D("1")
+
+    class SureFailBroker(SimulatedBroker):
+        def place(self, order: OrderRequest):  # type: ignore[no-untyped-def]
+            raise BrokerError("cannot qualify contract")
+
+    system.broker = SureFailBroker(settled_cash=D("1000"), clock=clock)
+    sure = system._place(
+        OrderRequest(ticker="ZZZ", side=Side.BUY, qty=D("1"), limit_price=D("10")),
+        purpose="ENTRY",
+        signal_id=None,
+    )
+    assert sure.status is OrderStatus.REJECTED
+
+
+def test_only_day_orders() -> None:
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        OrderRequest(ticker="ACME", side=Side.BUY, qty=D("1"), limit_price=D("10"), tif="GTC")  # type: ignore[arg-type]
+
+
+def test_pending_sells_boundaries(env) -> None:  # type: ignore[no-untyped-def]
+    from trader.risk.engine import RiskState
+
+    system, *_ = env
+    acct = AccountSnapshot(
+        ts=NOW, settled_cash=D("0"), positions={"ACME": Position(ticker="ACME", qty=D("3"), avg_cost=D("50"))}
+    )
+    sell2 = OrderRequest(ticker="ACME", side=Side.SELL, qty=D("2"), order_type=OrderType.MARKET)
+    ok = RiskState(False, 0, None, None, pending_sells={"ACME": D("1"), "OTHER": D("100")})
+    assert system.risk.evaluate(sell2, quote=None, account=acct, state=ok, now=NOW).approved
+    too_much = RiskState(False, 0, None, None, pending_sells={"ACME": D("1.5")})
+    assert not system.risk.evaluate(sell2, quote=None, account=acct, state=too_much, now=NOW).approved

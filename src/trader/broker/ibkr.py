@@ -266,8 +266,11 @@ class IbkrBroker:
         ib_order.outsideRth = False
         if self.account_id:
             ib_order.account = self.account_id
-        trade = self.ib.placeOrder(contract, ib_order)
-        self.ib.sleep(self.settle_wait)
+        try:
+            trade = self.ib.placeOrder(contract, ib_order)
+            self.ib.sleep(self.settle_wait)
+        except BrokerError as exc:  # after placeOrder the outcome is uncertain: never "not sent"
+            raise RuntimeError(f"order submission outcome unknown: {exc}") from exc
         return self._result(order.client_order_id, trade)
 
     def cancel(self, client_order_id: str) -> OrderResult | None:
