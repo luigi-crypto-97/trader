@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Protocol, runtime_checkable
-from zoneinfo import ZoneInfo
 
+from trader.broker.calendar import NEW_YORK, is_regular_session, next_trading_day
 from trader.domain import AccountSnapshot, Fill, OrderRequest, OrderResult, Quote
 
-NEW_YORK = ZoneInfo("America/New_York")
+__all__ = ["NEW_YORK", "Broker", "BrokerError", "is_regular_session", "market_date", "next_business_day"]
 
 
 class BrokerError(RuntimeError):
@@ -27,27 +27,18 @@ class Broker(Protocol):
 
     def cancel(self, client_order_id: str) -> OrderResult | None: ...
 
-    def order_status(self, client_order_id: str) -> OrderResult | None: ...
+    def order_status(self, client_order_id: str) -> OrderResult | None:
+        """None means the broker positively does not know the order. A broker that cannot tell
+        (disconnected, error) must raise BrokerError instead of returning None."""
+        ...
 
     def fills_since(self, since: datetime | None) -> list[Fill]: ...
 
 
 def next_business_day(day: date) -> date:
-    """Next weekday. US market holidays are not modelled (the broker is the source of truth)."""
-    nxt = day + timedelta(days=1)
-    while nxt.weekday() >= 5:
-        nxt += timedelta(days=1)
-    return nxt
+    """Next NYSE trading day (used for T+1 settlement in the simulator)."""
+    return next_trading_day(day)
 
 
 def market_date(ts: datetime) -> date:
     return ts.astimezone(NEW_YORK).date()
-
-
-def is_regular_session(ts: datetime) -> bool:
-    """NYSE regular session, 09:30-16:00 New York time, Monday-Friday (holidays not modelled)."""
-    local = ts.astimezone(NEW_YORK)
-    if local.weekday() >= 5:
-        return False
-    minutes = local.hour * 60 + local.minute
-    return 9 * 60 + 30 <= minutes < 16 * 60

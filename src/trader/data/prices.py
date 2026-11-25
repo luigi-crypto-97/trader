@@ -209,8 +209,8 @@ class PriceCache:
     def write_splits(self, splits: list[Split], start: date, end: date) -> None:
         """Merge ``splits`` (the complete list for [start, end]) into the stored list.
 
-        Older splits are never dropped; the covered date ranges are recorded so that
-        :meth:`read_splits` can refuse an incomplete list."""
+        Stored splits inside [start, end] are replaced by the new list; splits outside it are kept.
+        The covered date ranges are recorded so that :meth:`read_splits` can refuse an incomplete list."""
         try:
             existing, coverage = self._load_split_file()
         except PriceDataError:

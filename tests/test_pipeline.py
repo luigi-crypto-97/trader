@@ -12,7 +12,7 @@ from trader.broker.commissions import IbkrTieredUS
 from trader.broker.simulated import SimulatedBroker
 from trader.config import RiskLimits, Settings
 from trader.db import Database, EquitySnapshotRow
-from trader.domain import OrderRequest, OrderStatus, OrderType, Quote, Side, Signal
+from trader.domain import AccountSnapshot, OrderRequest, OrderStatus, OrderType, Position, Quote, Side, Signal
 from trader.pipeline import TradingSystem
 
 
@@ -224,7 +224,7 @@ def test_time_based_exit(env) -> None:  # type: ignore[no-untyped-def]
     system.decide(sig.id, approve=True, actor="tester")
     system.run_cycle()
     assert "ACME" in system.status()["positions"]
-    clock.advance(days=2, minutes=1)
+    clock.advance(days=3, minutes=1)  # Thu 26/11/2026 is Thanksgiving (closed): exit on Friday
     broker.set_quote(quote("ACME", "51", clock()))
     report = system.run_cycle()
     assert report.exits == 1
@@ -429,3 +429,123 @@ def test_orders_unknown_to_broker_are_reconciled_next_day(tmp_path: Path) -> Non
     with db.session() as s:
         assert s.get(OrderRow, "ghost").status == "CANCELLED"  # type: ignore[union-attr]
     assert any("non più noto al broker" in m for m in notifier.messages)
+
+
+class RaisingNotifier(Recorder):
+    def notify(self, text: str) -> None:
+        raise RuntimeError("telegram down")
+
+
+def ghost_order(db: Database, coid: str, created: datetime, side: str = "SELL") -> None:
+    from trader.db import OrderRow
+
+    with db.session() as s:
+        s.add(
+            OrderRow(
+                client_order_id=coid,
+                signal_id=None,
+                purpose="EXIT_STOP",
+                ticker="ACME",
+                side=side,
+                qty=D("1"),
+                order_type="LIMIT",
+                limit_price=D("40"),
+                status="OPEN",
+                filled_qty=D("0"),
+                commission=D("0"),
+                created_at=created,
+                updated_at=created,
+            )
+        )
+
+
+def order_status(db: Database, coid: str) -> str:
+    from trader.db import OrderRow
+
+    with db.session() as s:
+        row = s.get(OrderRow, coid)
+        assert row is not None
+        return row.status
+
+
+def test_order_still_known_to_broker_is_never_reconciled(env) -> None:  # type: ignore[no-untyped-def]
+    system, _broker, clock, _ = env
+    resting = OrderRequest(ticker="ACME", side=Side.BUY, qty=D("1"), limit_price=D("40"))
+    system._place(resting, purpose="ENTRY", signal_id=None)  # rests: limit below the market
+    clock.advance(days=2)
+    system.sync()
+    assert order_status(system.db, resting.client_order_id) == "OPEN"
+
+
+def test_order_sent_on_holiday_survives_until_next_session_closes(tmp_path: Path) -> None:
+    thanksgiving_noon = datetime(2026, 11, 26, 17, 0, tzinfo=NOW.tzinfo)  # market closed all day
+    clock = Clock(thanksgiving_noon)
+    db = Database(f"sqlite:///{tmp_path / 'hol.sqlite'}")
+    system = TradingSystem(
+        db=db,
+        broker=SimulatedBroker(settled_cash=D("1000"), clock=clock),
+        limits=RiskLimits(),
+        commissions=IbkrTieredUS(),
+        audit=AuditLog(db),
+        clock=clock,
+    )
+    ghost_order(db, "h1", thanksgiving_noon)
+    clock.now = datetime(2026, 11, 27, 16, 0, tzinfo=NOW.tzinfo)  # Friday 11:00 ET, half day still open
+    system.sync()
+    assert order_status(db, "h1") == "OPEN"
+    clock.now = datetime(2026, 11, 27, 18, 31, tzinfo=NOW.tzinfo)  # 13:31 ET: early close + grace passed
+    system.sync()
+    assert order_status(db, "h1") == "CANCELLED"
+
+
+def test_notification_failure_does_not_stop_exits(tmp_path: Path) -> None:
+    clock = Clock(NOW)
+    db = Database(f"sqlite:///{tmp_path / 'nf.sqlite'}")
+    broker = SimulatedBroker(settled_cash=D("1000"), clock=clock, slippage_bps=D("0"))
+    broker.set_quote(quote("ACME", "50", clock()))
+    system = TradingSystem(
+        db=db,
+        broker=broker,
+        limits=RiskLimits(),
+        commissions=IbkrTieredUS(),
+        audit=AuditLog(db),
+        notifier=RaisingNotifier(),
+        clock=clock,
+    )
+    sig = make_signal()
+    system.submit_signal(sig)
+    system.run_cycle()
+    system.decide(sig.id, approve=True, actor="t")
+    system.run_cycle()  # fill notification raises inside sync: must be swallowed
+    ghost_order(db, "g1", NOW - timedelta(days=3))  # reconciliation notification raises too
+    clock.advance(minutes=5)
+    stop = D(system.status()["positions"]["ACME"]["exit_plan"]["stop_price"])
+    broker.set_quote(quote("ACME", str(stop - 1), clock()))
+    report = system.run_cycle()
+    assert report.exits == 1 and order_status(db, "g1") == "CANCELLED"
+
+
+def test_open_sell_prevents_a_second_sell(env) -> None:  # type: ignore[no-untyped-def]
+    from trader.risk.engine import RiskState
+
+    system, _broker, _clock, _ = env
+    acct = AccountSnapshot(
+        ts=NOW, settled_cash=D("0"), positions={"ACME": Position(ticker="ACME", qty=D("2"), avg_cost=D("50"))}
+    )
+    sell = OrderRequest(ticker="ACME", side=Side.SELL, qty=D("2"), order_type=OrderType.MARKET)
+    state = RiskState(False, 0, None, None, pending_sells={"ACME": D("2")})
+    d = system.risk.evaluate(sell, quote=None, account=acct, state=state, now=NOW)
+    assert not d.approved and "long_only_no_short" in d.summary()
+
+
+def test_signal_dropped_at_execution_when_ticker_becomes_restricted(env) -> None:  # type: ignore[no-untyped-def]
+    system, _broker, _clock, _ = env
+    sig = make_signal()
+    system.submit_signal(sig)
+    system.run_cycle()
+    system.decide(sig.id, approve=True, actor="t")
+    system.limits = RiskLimits(restricted=["ACME"])
+    system.risk = type(system.risk)(system.limits, system.commissions)
+    report = system.run_cycle()
+    assert report.executed == 0 and system.get_signal(sig.id) is None
+    assert not [r for r in system.audit.tail(200) if r["event"] == "order.submit"]

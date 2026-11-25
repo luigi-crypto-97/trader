@@ -19,6 +19,9 @@ WWW = "https://www.sec.gov"
 DATA = "https://data.sec.gov"
 
 
+_BLOCKED_MARKERS = ("Request Rate Threshold Exceeded", "Undeclared Automated Tool")
+
+
 class EdgarError(RuntimeError):
     pass
 
@@ -64,8 +67,14 @@ class EdgarClient:
                 self.sleep(delay)
                 delay *= 2
                 continue
-            if resp.status_code == 404 and allow_404:
+            if allow_404 and resp.status_code == 404:
                 return None
+            if resp.status_code == 403:
+                body = resp.text[:5000]
+                if any(m in body for m in _BLOCKED_MARKERS):
+                    raise EdgarError(f"SEC blocked the request (rate limit or User-Agent policy): {url}")
+                if allow_404:  # EDGAR archives answer 403 for files that do not exist (e.g. holidays)
+                    return None
             if resp.status_code in (429, 500, 502, 503, 504) and attempt < self.retries:
                 self.sleep(delay)
                 delay *= 2

@@ -299,3 +299,16 @@ def test_domain_normalizes_tickers() -> None:
         dedup_key="d",
     )
     assert s.ticker == "BRK-B"
+
+
+def test_mcp_audit_view_identical_for_duplicate_and_restricted(tmp_path: Path) -> None:
+    server = build_server(Lab(settings(tmp_path)))
+    args = {"thesis": "t", "horizon_days": 20, "conviction": 0.7, "stop_loss_pct": 0.08, "evidence": ["x"]}
+    call(server, "propose_signal", {"ticker": "DUPL", **args})
+    before = call(server, "audit_tail", {"n": 200})
+    dup = call(server, "propose_signal", {"ticker": "DUPL", **args})
+    after_dup = call(server, "audit_tail", {"n": 200})
+    restricted = call(server, "propose_signal", {"ticker": "SECRT", **args})
+    after_restricted = call(server, "audit_tail", {"n": 200})
+    assert dup == restricted
+    assert before == after_dup == after_restricted

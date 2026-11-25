@@ -18,6 +18,7 @@ NAN = float("nan")
 
 class FakeIB:
     def __init__(self) -> None:
+        self.connected = True
         self.placed: list[tuple[Any, Any]] = []
         self._trades: list[Any] = []
         self._fills: list[Any] = []
@@ -41,6 +42,9 @@ class FakeIB:
                 marketPrice=11.0,
             ),
         ]
+
+    def isConnected(self) -> bool:
+        return self.connected
 
     def qualifyContracts(self, c: Any) -> list[Any]:
         return [c] if c.symbol != "NOPE" else [None]
@@ -147,3 +151,15 @@ def test_fills_wait_for_commission_report(ib: FakeIB) -> None:
     (fill,) = broker.fills_since(None)
     assert fill.ticker == "BRK-B" and fill.side is Side.BUY and fill.commission == D("0.35")
     assert fill.client_order_id == "coid1" and fill.qty == D("0.5")
+
+
+def test_disconnected_gateway_raises_instead_of_reporting_nothing(ib: FakeIB) -> None:
+    from trader.broker.base import BrokerError
+
+    broker = IbkrBroker(ib, clock=lambda: NOW, settle_wait=0)
+    broker.place(OrderRequest(ticker="ACME", side=Side.BUY, qty=D("1"), limit_price=D("50")))
+    ib.connected = False
+    ib._trades = []  # what ib_async exposes after a disconnect
+    for call in (lambda: broker.order_status("x"), broker.account, lambda: broker.fills_since(None)):
+        with pytest.raises(BrokerError):
+            call()

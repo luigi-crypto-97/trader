@@ -110,6 +110,12 @@ class IbkrBroker:
         ib.reqMarketDataType(market_data_type)
         return cls(ib, account=account)
 
+    def _require_connection(self) -> None:
+        """A disconnected ib_async client reports empty trades/positions; never mistake that for
+        'no orders' or 'flat account'."""
+        if not self.ib.isConnected():
+            raise BrokerError("IB Gateway not connected")
+
     def close(self) -> None:
         if self.ib.isConnected():
             self.ib.disconnect()
@@ -137,6 +143,7 @@ class IbkrBroker:
         return out
 
     def account(self) -> AccountSnapshot:
+        self._require_connection()
         vals = self._account_values()
         total_usd = vals.get(("TotalCashValue", "USD"), Decimal("0"))
         settled = vals.get(("SettledCash", "USD"))
@@ -188,6 +195,7 @@ class IbkrBroker:
         return self._adv[key]
 
     def quote(self, ticker: str) -> Quote | None:
+        self._require_connection()
         try:
             contract = self._contract(ticker)
         except BrokerError as exc:
@@ -239,6 +247,7 @@ class IbkrBroker:
         )
 
     def place(self, order: OrderRequest) -> OrderResult:
+        self._require_connection()
         existing = self._find_trade(order.client_order_id)
         if existing is not None:  # idempotent resubmission
             return self._result(order.client_order_id, existing, "already submitted")
@@ -262,6 +271,7 @@ class IbkrBroker:
         return self._result(order.client_order_id, trade)
 
     def cancel(self, client_order_id: str) -> OrderResult | None:
+        self._require_connection()
         trade = self._find_trade(client_order_id)
         if trade is None:
             return None
@@ -271,10 +281,12 @@ class IbkrBroker:
         return self._result(client_order_id, trade)
 
     def order_status(self, client_order_id: str) -> OrderResult | None:
+        self._require_connection()
         trade = self._find_trade(client_order_id)
         return self._result(client_order_id, trade) if trade is not None else None
 
     def fills_since(self, since: datetime | None) -> list[Fill]:
+        self._require_connection()
         out: list[Fill] = []
         for f in self.ib.fills():
             ex = f.execution

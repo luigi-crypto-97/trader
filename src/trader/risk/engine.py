@@ -32,6 +32,9 @@ class RiskState:
     # Committed cash of BUY orders sent but not yet filled: ticker -> remaining notional + commission.
     pending_buys: Mapping[str, Decimal] = field(default_factory=dict)
 
+    # Remaining quantity of SELL orders sent but not yet filled: ticker -> shares.
+    pending_sells: Mapping[str, Decimal] = field(default_factory=dict)
+
     @property
     def pending_total(self) -> Decimal:
         return sum(self.pending_buys.values(), Decimal("0"))
@@ -101,19 +104,27 @@ class RiskEngine:
         now: datetime,
     ) -> RiskDecision:
         if order.side is Side.SELL:
-            return self._evaluate_exit(order, quote=quote, account=account, now=now)
+            return self._evaluate_exit(order, quote=quote, account=account, state=state, now=now)
         return self._evaluate_entry(order, quote=quote, account=account, state=state, now=now)
 
     # ------------------------------------------------------------------ exits
     def _evaluate_exit(
-        self, order: OrderRequest, *, quote: Quote | None, account: AccountSnapshot, now: datetime
+        self,
+        order: OrderRequest,
+        *,
+        quote: Quote | None,
+        account: AccountSnapshot,
+        state: RiskState,
+        now: datetime,
     ) -> RiskDecision:
         c = _Collector()
         held = account.qty(order.ticker)
+        selling = state.pending_sells.get(order.ticker, Decimal("0"))
+        # Shares already being sold by open orders cannot be sold twice (that would be a short sale).
         c.add(
             "long_only_no_short",
-            held > 0 and order.qty <= held,
-            f"sell {order.qty} vs held {held}",
+            held > 0 and order.qty + selling <= held,
+            f"sell {order.qty} + pending sells {selling} vs held {held}",
         )
         fresh = self._fresh_ref(quote, now)
         if order.order_type is OrderType.LIMIT and order.limit_price is not None and fresh is not None:

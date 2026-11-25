@@ -215,7 +215,20 @@ def build_server(lab: Lab | None = None) -> MCPServer:
 
     @server.tool(description="Last N audit-log records (hash-chained).")
     def audit_tail(n: int = 20) -> list[dict[str, Any]]:
-        return lab.audit.tail(min(max(n, 1), 200))
+        n = min(max(n, 1), 200)
+        records = lab.audit.tail(n * 3)
+        with lab.db.session() as s:
+            live = set(s.scalars(select(SignalRow.id)))
+
+        def visible(r: dict[str, Any]) -> bool:
+            # Records about privately dropped signals would let an agent infer the private list.
+            if r["event"] == "signal.dropped":
+                return False
+            if r["event"] == "signal.proposed":
+                return str(json.loads(r["payload"]).get("id")) in live
+            return True
+
+        return [r for r in records if visible(r)][-n:]
 
     return server
 

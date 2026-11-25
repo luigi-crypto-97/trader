@@ -28,6 +28,7 @@ from sqlalchemy import func, select
 
 from trader.audit import AuditLog
 from trader.broker.base import NEW_YORK, Broker, is_regular_session
+from trader.broker.calendar import first_session_close_after
 from trader.broker.commissions import CommissionModel
 from trader.config import RiskLimits
 from trader.db import (
@@ -58,6 +59,7 @@ log = logging.getLogger(__name__)
 KILL_SWITCH_KEY = "kill_switch"
 LAST_FILL_KEY = "last_fill_ts"
 LAST_ACCOUNT_KEY = "last_account"
+RECONCILE_GRACE = timedelta(minutes=30)
 
 
 class Notifier(Protocol):
@@ -159,6 +161,13 @@ class TradingSystem:
         self.clock = clock
         self.session_check = session_check
 
+    def _notify(self, text: str) -> None:
+        """Notifications are best effort: a messaging failure must never stop sync, exits or entries."""
+        try:
+            self.notifier.notify(text)
+        except Exception as exc:
+            log.warning("notification failed: %s", exc)
+
     # ------------------------------------------------------------ kill switch
     def kill_switch_on(self) -> bool:
         state = self.db.kv_get(KILL_SWITCH_KEY, {"on": False})
@@ -169,7 +178,7 @@ class TradingSystem:
             KILL_SWITCH_KEY, {"on": on, "reason": reason, "actor": actor, "ts": self.clock().isoformat()}
         )
         self.audit.record("kill_switch", {"on": on, "reason": reason, "actor": actor}, ts=self.clock())
-        self.notifier.notify(f"Kill switch {'ON' if on else 'OFF'} ({actor}): {reason}")
+        self._notify(f"Kill switch {'ON' if on else 'OFF'} ({actor}): {reason}")
 
     # ------------------------------------------------------------- snapshots
     def snapshot(self) -> AccountSnapshot:
@@ -214,6 +223,15 @@ class TradingSystem:
                 price = o.limit_price or o.avg_fill_price or Decimal("0")
                 committed = remaining * price + self.commissions.estimate(remaining, price)
                 pending_buys[o.ticker] = pending_buys.get(o.ticker, Decimal("0")) + committed
+            pending_sells: dict[str, Decimal] = {}
+            for o in s.scalars(
+                select(OrderRow).where(
+                    OrderRow.side == Side.SELL.value,
+                    OrderRow.status.in_([OrderStatus.OPEN.value, OrderStatus.PARTIALLY_FILLED.value]),
+                )
+            ):
+                rest = max(o.qty - o.filled_qty, Decimal("0"))
+                pending_sells[o.ticker] = pending_sells.get(o.ticker, Decimal("0")) + rest
             orders_today = s.scalar(
                 select(func.count())
                 .select_from(OrderRow)
@@ -225,6 +243,7 @@ class TradingSystem:
             start_of_day_equity=first_today.equity if first_today else None,
             peak_equity=max(peak_rows) if peak_rows else None,
             pending_buys=pending_buys,
+            pending_sells=pending_sells,
         )
 
     # --------------------------------------------------------------- signals
@@ -514,18 +533,20 @@ class TradingSystem:
                     )
                 )
             )
-        day_start = self._day_start()
+        now = self.clock()
         for coid in open_ids:
+            # A broker that cannot tell (disconnected, error) raises: nothing is reconciled then.
             result = self.broker.order_status(coid)
             if result is not None:
                 self._store_order_result(result)
                 continue
             with self.db.session() as s:
                 row = s.get(OrderRow, coid)
-                stale = row is not None and row.created_at < day_start
+                # All orders are DAY orders. Only once the first NYSE session in which the order could
+                # trade has closed (plus a margin) does "unknown to the broker" mean "gone".
+                stale = row is not None and now > first_session_close_after(row.created_at) + RECONCILE_GRACE
                 if stale and row is not None:
-                    # All orders are DAY orders: one the broker no longer reports after its session ended
-                    # is gone. Keeping it OPEN would lock cash and, for a SELL, block the exit.
+                    # Keeping a dead order OPEN would lock cash and, for a SELL, block the exit.
                     row.status = OrderStatus.CANCELLED.value
                     row.message = "unknown to broker after its session; reconciled as cancelled"
                     row.updated_at = self.clock()
@@ -534,9 +555,7 @@ class TradingSystem:
                 self.audit.record(
                     "order.reconciled", {"client_order_id": coid, "status": "CANCELLED"}, ts=self.clock()
                 )
-                self.notifier.notify(
-                    f"ATTENZIONE: ordine {side} {ticker} non più noto al broker, chiuso d'ufficio"
-                )
+                self._notify(f"ATTENZIONE: ordine {side} {ticker} non più noto al broker, chiuso d'ufficio")
 
         last = self.db.kv_get(LAST_FILL_KEY)
         since = datetime.fromisoformat(last) if last else None
@@ -591,7 +610,7 @@ class TradingSystem:
                     else:  # adding to a position: keep the tighter (higher) stop
                         plan.stop_price = max(plan.stop_price, stop)
         self.audit.record("fill", fill.model_dump(mode="json"), ts=self.clock())
-        self.notifier.notify(
+        self._notify(
             f"Eseguito {fill.side.value} {fill.qty} {fill.ticker} @ {fill.price} (comm. {fill.commission})"
         )
         return True
@@ -635,12 +654,12 @@ class TradingSystem:
             )
             if not decision.approved:
                 self.audit.record("exit.blocked", {"ticker": ticker, "reason": decision.summary()}, ts=now)
-                self.notifier.notify(f"ATTENZIONE: uscita {ticker} bloccata: {decision.summary()}")
+                self._notify(f"ATTENZIONE: uscita {ticker} bloccata: {decision.summary()}")
                 continue
             result = self._place(order, purpose=reason, signal_id=None)
             if result.status is not OrderStatus.REJECTED:
                 exits += 1
-            self.notifier.notify(f"Uscita {reason} {ticker}: {result.status.value} {result.message}")
+            self._notify(f"Uscita {reason} {ticker}: {result.status.value} {result.message}")
         self._drop_closed_plans()
         return exits
 

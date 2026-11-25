@@ -201,3 +201,15 @@ def test_ingest_concurrent_workers_same_result(tmp_path: Path) -> None:
     ing = EdgarIngestor(mock_client(fake_sec()), db, clock=lambda: now, workers=4)
     report = ing.ingest_day(date(2026, 11, 23))
     assert report.stored == 3 and report.insider_rows == 3 and not report.errors
+
+
+def test_sec_403_missing_file_vs_rate_limit() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "master.20260525" in request.url.path:  # Memorial Day: no index, EDGAR answers 403
+            return httpx.Response(403, text="<Error><Code>AccessDenied</Code></Error>")
+        return httpx.Response(403, text="<html>Request Rate Threshold Exceeded</html>")
+
+    client = mock_client(httpx.MockTransport(handler))
+    assert client.master_index(date(2026, 5, 25)) == []
+    with pytest.raises(EdgarError):
+        client.master_index(date(2026, 5, 26))
