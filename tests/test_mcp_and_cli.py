@@ -428,7 +428,7 @@ def test_cycle_still_exits_when_optional_phases_fail(cli_env: Path) -> None:
     stop = D(rt.system.status()["positions"]["ACME"]["exit_plan"]["stop_price"])
 
     class Broken:
-        def process_updates(self, system: object) -> int:
+        def process_updates(self, system: object, deadline: float | None = None) -> int:
             raise ConnectionError("telegram unreachable")
 
     seen_sells: list[int] = []
@@ -446,7 +446,8 @@ def test_cycle_still_exits_when_optional_phases_fail(cli_env: Path) -> None:
     clock[0] = clock[0].replace(minute=10)
     rt.broker.set_quote(q(str(stop - 1)))  # type: ignore[attr-defined]
     out = _one_cycle(rt, ingest=False, generate=True)
-    assert "telegram_updates_error" in out and out["new_signals_error"].startswith("RuntimeError")
+    assert out["telegram_updates_error"].startswith("ConnectionError")
+    assert out["new_signals_error"].startswith("RuntimeError")
     assert out["cycle"]["exits"] == 1
     assert seen_sells == [1]  # the stop exit was already sent when the slow phase began
 
@@ -525,3 +526,10 @@ def test_mcp_cannot_tell_private_8k_from_others(tmp_path: Path) -> None:
     filings = call(server, "recent_filings", {"form": "8-K"})
     assert {tuple(sorted(f)) for f in filings} == {tuple(sorted(filings[0]))}  # identical shape
     assert all("analyzed" not in json.dumps(f) for f in filings)
+
+
+def test_run_rejects_too_short_interval(cli_env: Path) -> None:
+    from trader.cli import app
+
+    res = CliRunner().invoke(app, ["run", "--interval", "10", "--poll", "10"])
+    assert res.exit_code != 0

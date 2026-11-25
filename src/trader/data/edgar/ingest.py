@@ -60,13 +60,19 @@ class EdgarIngestor:
         self.workers = max(1, workers)
 
     # ---------------------------------------------------------------- tickers
-    def ticker_map(self) -> dict[int, str]:
-        """CIK -> ticker for companies listed on the allowed exchanges, refreshed daily."""
+    def ticker_map(self, deadline: float | None = None) -> dict[int, str]:
+        """CIK -> ticker for companies listed on the allowed exchanges, refreshed daily. If the
+        refresh cannot finish before ``deadline``, yesterday's map is used."""
         today = self.clock().date().isoformat()
         cached = self.db.kv_get(TICKER_CACHE_KEY)
         if cached and cached.get("date") == today:
             return {int(k): v for k, v in cached["map"].items()}
-        raw = self.client.ticker_exchange_map()
+        try:
+            raw = self.client.ticker_exchange_map(deadline=deadline)
+        except EdgarError:
+            if cached:
+                return {int(k): v for k, v in cached["map"].items()}
+            raise
         mapping = {cik: t for cik, (t, exch) in raw.items() if exch in self.exchanges}
         self.db.kv_set(TICKER_CACHE_KEY, {"date": today, "map": {str(k): v for k, v in mapping.items()}})
         return mapping
@@ -102,7 +108,7 @@ class EdgarIngestor:
         that must include companies delisted since (no survivorship bias). ``deadline``
         (time.monotonic) stops starting downloads; what is left is reported as deferred."""
         wanted = set(forms) & SUPPORTED_FORMS
-        tickers = tickers if tickers is not None else self.ticker_map()
+        tickers = tickers if tickers is not None else self.ticker_map(deadline=deadline)
         by_accession: dict[str, list[IndexEntry]] = {}
         for e in entries:
             if e.form in wanted:

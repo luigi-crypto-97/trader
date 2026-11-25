@@ -237,3 +237,10 @@ def test_ingest_stops_at_deadline_and_resumes(tmp_path: Path, monkeypatch: pytes
     assert clock[0] <= 45.0 + 30.0  # at most one download in flight past the deadline
     second = ing.ingest_entries(entries, {"4", "8-K"})
     assert second.stored == first.deferred and second.deferred == 0
+
+
+def test_ticker_map_falls_back_to_cache_when_refresh_times_out(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'tm.sqlite'}")
+    db.kv_set("sec_ticker_map", {"date": "2026-11-23", "map": {"1019034": "BKYI"}})
+    ing = EdgarIngestor(mock_client(fake_sec()), db, clock=lambda: datetime(2026, 11, 24, tzinfo=UTC))
+    assert ing.ticker_map(deadline=0.0) == {1019034: "BKYI"}  # deadline long gone: yesterday's map

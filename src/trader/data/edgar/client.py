@@ -74,10 +74,12 @@ class EdgarClient:
         request's timeout is capped to the time left."""
         delay = 1.0
         for attempt in range(self.retries + 1):
-            left = None if deadline is None else deadline - time.monotonic()
-            if left is not None and left <= 0:
+            if deadline is not None and deadline - time.monotonic() <= 0:
                 raise EdgarDeferred(f"deadline reached before GET {url}")
             self._throttle()
+            left = None if deadline is None else deadline - time.monotonic()  # after throttling
+            if left is not None and left <= 0:
+                raise EdgarDeferred(f"deadline reached before GET {url}")
             timeout = REQUEST_TIMEOUT if left is None else max(1.0, min(REQUEST_TIMEOUT, left))
             try:
                 resp = self.http.get(url, headers=self.headers, timeout=timeout)
@@ -96,6 +98,8 @@ class EdgarClient:
                 if allow_404:  # EDGAR archives answer 403 for files that do not exist (e.g. holidays)
                     return None
             if resp.status_code in (429, 500, 502, 503, 504) and attempt < self.retries:
+                if deadline is not None and time.monotonic() + delay >= deadline:
+                    raise EdgarDeferred(f"no time left to retry GET {url}")
                 self.sleep(delay)
                 delay *= 2
                 continue
@@ -105,9 +109,9 @@ class EdgarClient:
         raise EdgarError(f"GET {url} exhausted retries")
 
     # ------------------------------------------------------------- endpoints
-    def ticker_exchange_map(self) -> dict[int, tuple[str, str]]:
+    def ticker_exchange_map(self, deadline: float | None = None) -> dict[int, tuple[str, str]]:
         """CIK -> (ticker, exchange) for SEC-registered listed companies."""
-        resp = self.get(f"{WWW}/files/company_tickers_exchange.json")
+        resp = self.get(f"{WWW}/files/company_tickers_exchange.json", deadline=deadline)
         assert resp is not None
         payload = resp.json()
         fields = payload["fields"]

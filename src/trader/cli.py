@@ -287,6 +287,7 @@ def reject(signal_id: str, note: str = "") -> None:
 
 # --------------------------------------------------------------------- cycle
 TELEGRAM_BUDGET = 30.0  # seconds of Telegram command handling before the trading cycle
+MIN_INTERVAL = 60  # seconds: leaves room for the Telegram budget and optional work
 
 
 def _one_cycle(rt: Runtime, *, ingest: bool, generate: bool, deadline: float | None = None) -> dict[str, Any]:
@@ -342,6 +343,8 @@ def run(
     poll: Annotated[int, typer.Option(help="Secondi tra i controlli Telegram")] = 10,
 ) -> None:
     """Esecuzione continua. Ctrl+C per fermare (lo stato viene salvato)."""
+    if interval < MIN_INTERVAL or poll < 1 or poll >= interval:
+        raise typer.BadParameter(f"serve interval >= {MIN_INTERVAL}s e 1 <= poll < interval")
     _setup_logging()
     rt = _rt()
     typer.echo(f"Avvio: broker={rt.broker.name}, approvazione={rt.settings.approval_mode}, ciclo={interval}s")
@@ -365,8 +368,8 @@ def run(
                     rt = alerts.failed(rt, exc, rebuild=partial(build_runtime, start_settings))
                     next_cycle = now + min(interval, 60)  # retry the trading cycle soon
             elif rt.telegram is not None:
-                try:  # between cycles: a Telegram outage only affects Telegram
-                    rt.telegram.process_updates(rt.system)
+                try:  # between cycles: bounded so that it never delays the next trading cycle
+                    rt.telegram.process_updates(rt.system, deadline=next_cycle - 5)
                 except Exception as exc:
                     log.warning("telegram polling failed: %s", exc)
             time.sleep(poll)

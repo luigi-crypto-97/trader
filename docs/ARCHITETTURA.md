@@ -66,4 +66,30 @@ perdita o restricted list.
   ne nega la lettura agli agenti.
 - Il testo dei filing è trattato come dato non affidabile (prompt injection) in tutti i prompt.
 - Dal telefono (Telegram) si può fermare il sistema (`/kill`) ma non riavviarlo: la riattivazione
-  avviene solo da CLI.
+  avviene solo da CLI. `/kill` viene applicato prima di ogni altro comando e di ogni scadenza; solo
+  il titolare della chat configurata è autorizzato.
+- Il registro di audit non è esposto agli agenti (né via MCP né in lettura su `var/`): via MCP
+  arriva solo l'esito della verifica di integrità.
+
+### Rischi residui accettati (restricted list)
+
+Gli agenti vedono dati pubblici grezzi (Form 4, 8-K) e la coda dei segnali. Un agente che li
+incrociasse deliberatamente potrebbe dedurre con buona probabilità che un titolo è nella
+restricted list:
+
+- ricalcolando un cluster di acquisti insider dai dati grezzi e notando che non compare in coda;
+- proponendo un titolo mai proposto prima e osservando che non viene accodato (al massimo 20
+  proposte al giorno);
+- notando che un segnale già in coda sparisce quando il titolo viene aggiunto alla lista.
+
+Chiudere questi canali richiederebbe di nascondere agli agenti la coda o i dati di mercato, cioè
+il loro lavoro. Poiché la lista è personale e la sua riservatezza è di livello basso, il rischio è
+accettato e dichiarato. Se servisse una riservatezza forte, la soluzione è non usare gli agenti
+MCP con una restricted list attiva.
+
+### Tempi del ciclo
+
+Ordine: comandi Telegram (al massimo 30 s, `/kill` sempre per primo) → ciclo di trading
+(sincronizzazione, stop-loss e uscite a scadenza, ordini approvati) → acquisizione EDGAR e analisi
+LLM, che si fermano 10 s prima del ciclo successivo. Ogni richiesta HTTP ha un timeout limitato al
+tempo rimasto; il lavoro non completato riprende al ciclo dopo. Intervallo minimo: 60 s.

@@ -272,12 +272,16 @@ class FilingAnalyzer:
     deadline: float | None = None
     monotonic: Callable[[], float] = staticmethod(time.monotonic)
 
+    last_call_capped: bool = False  # the last call's timeout was cut by the budget
+
     def _call_timeout(self) -> float:
         if self.deadline is None:
+            self.last_call_capped = False
             return CALL_TIMEOUT
         left = self.deadline - self.monotonic()
         if left < MIN_CALL_SECONDS:
             raise OutOfTime("time budget exhausted")
+        self.last_call_capped = left < CALL_TIMEOUT
         return min(CALL_TIMEOUT, left)
 
     @staticmethod
@@ -388,7 +392,7 @@ def classify_error(exc: Exception) -> str:
     if isinstance(exc, anthropic.APIConnectionError):
         return "outage"
     if isinstance(exc, anthropic.APIStatusError):
-        if exc.status_code in (401, 403):
+        if exc.status_code in (401, 403, 404):  # credentials, permissions, unknown model or beta
             return "config"
         if exc.status_code in (408, 409, 429) or exc.status_code >= 500:
             return "outage"
@@ -446,6 +450,8 @@ def analyze_recent_8k(
                 outcome = analyzer.analyze(f, text, now)
             except Exception as exc:
                 kind = classify_error(exc)
+                if kind == "timeout" and analyzer.last_call_capped:
+                    kind = "budget"  # cut short by our own budget: not the filing's fault
                 if kind in {"budget", "outage", "config"}:
                     level = logging.ERROR if kind == "config" else logging.INFO
                     log.log(level, "LLM batch stopped (%s): %s", kind, exc)
@@ -455,7 +461,11 @@ def analyze_recent_8k(
                     f.accession, None, "error", f"{type(exc).__name__}: {str(exc)[:500]}"
                 )
             if on_outcome:  # before marking: a failing audit leaves the filing to be retried
-                on_outcome(outcome)
+                try:
+                    on_outcome(outcome)
+                except Exception as exc:
+                    log.warning("could not record LLM outcome for %s: %s", f.accession, exc)
+                    continue  # not marked: analysed again later; ideas already collected are kept
             if outcome.stage == "error":
                 attempts = int(db.kv_get(attempts_key, 0)) + 1
                 db.kv_set(attempts_key, attempts)

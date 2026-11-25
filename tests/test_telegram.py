@@ -88,8 +88,8 @@ def test_pending_notification_and_button_approval(tmp_path: Path) -> None:
 def test_kill_command_only_turns_on(tmp_path: Path) -> None:
     system, bot, fake = setup(tmp_path)
     fake.updates = [
-        {"update_id": 5, "message": {"chat": {"id": 1}, "text": "/kill"}},
-        {"update_id": 6, "message": {"chat": {"id": CHAT}, "text": "/kill"}},
+        {"update_id": 5, "message": {"chat": {"id": 1}, "from": {"id": 1}, "text": "/kill"}},
+        {"update_id": 6, "message": {"chat": {"id": CHAT}, "from": {"id": CHAT}, "text": "/kill"}},
     ]
     assert bot.process_updates(system) == 1
     assert system.kill_switch_on()
@@ -140,8 +140,8 @@ def test_kill_processed_even_if_an_earlier_command_fails(tmp_path: Path) -> None
 
     system.status = broken_status  # type: ignore[method-assign]
     fake.updates = [
-        {"update_id": 10, "message": {"chat": {"id": CHAT}, "text": "/status"}},
-        {"update_id": 11, "message": {"chat": {"id": CHAT}, "text": "/kill"}},
+        {"update_id": 10, "message": {"chat": {"id": CHAT}, "from": {"id": CHAT}, "text": "/status"}},
+        {"update_id": 11, "message": {"chat": {"id": CHAT}, "from": {"id": CHAT}, "text": "/kill"}},
     ]
     bot.process_updates(system)
     assert system.kill_switch_on()
@@ -173,7 +173,47 @@ def test_updates_left_for_next_poll_after_deadline(tmp_path: Path) -> None:
     import time as _time
 
     system, bot, fake = setup(tmp_path)
-    fake.updates = [{"update_id": 30, "message": {"chat": {"id": CHAT}, "text": "/kill"}}]
+    fake.updates = [
+        {"update_id": 30, "message": {"chat": {"id": CHAT}, "from": {"id": CHAT}, "text": "/pending"}}
+    ]
     assert bot.process_updates(system, deadline=_time.monotonic() - 1) == 0
+    assert bot.process_updates(system) == 1  # left unacknowledged, handled on the next poll
+
+
+def test_kill_applied_first_even_past_deadline_and_before_approvals(tmp_path: Path) -> None:
+    import time as _time
+
+    system, bot, fake = setup(tmp_path)
+    sig = make_signal()
+    system.submit_signal(sig)
+    system.run_cycle()
+    fake.updates = [
+        callback(40, f"ap:{sig.id}", chat=CHAT),
+        {"update_id": 41, "message": {"chat": {"id": CHAT}, "from": {"id": CHAT}, "text": "/kill"}},
+    ]
+    bot.process_updates(system, deadline=_time.monotonic() - 1)  # budget already spent
+    assert system.kill_switch_on()
+    assert system.run_cycle().executed == 0
+
+
+def test_group_member_cannot_command(tmp_path: Path) -> None:
+    system, bot, fake = setup(tmp_path)
+    sig = make_signal()
+    system.submit_signal(sig)
+    system.run_cycle()
+    stranger = 777
+    fake.updates = [
+        {"update_id": 50, "message": {"chat": {"id": CHAT}, "from": {"id": stranger}, "text": "/kill"}},
+        {
+            "update_id": 51,
+            "callback_query": {
+                "id": "c",
+                "data": f"ap:{sig.id}",
+                "from": {"id": stranger},
+                "message": {"message_id": 1, "chat": {"id": CHAT}},
+            },
+        },
+    ]
+    bot.process_updates(system)
     assert not system.kill_switch_on()
-    assert bot.process_updates(system) == 1 and system.kill_switch_on()  # handled on the next poll
+    assert system.get_signal(sig.id)["status"] == "PENDING_APPROVAL"  # type: ignore[index]

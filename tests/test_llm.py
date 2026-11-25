@@ -317,3 +317,40 @@ def test_credential_errors_stop_batch_without_penalty(tmp_path: Path) -> None:
         analyze_recent_8k(db, FilingAnalyzer(Raising(err)), NOW)
     with db.session() as s:
         assert not s.get(FilingRow, "0000000001-26-000001").analyzed  # type: ignore[union-attr]
+
+
+def test_budget_capped_timeout_is_not_the_filings_fault(tmp_path: Path) -> None:
+    db = _two_filings(tmp_path)
+    caller = Clocked(cost=1, fail=TimeoutError("read timeout"))
+    caller.now = 0.0
+    analyze_recent_8k(db, FilingAnalyzer(caller), NOW, budget_seconds=60, monotonic=caller.clock)
+    assert caller.timeouts and caller.timeouts[0] == 60  # capped by the budget
+    assert db.kv_get("llm_attempts:0000000001-26-000001") is None  # no attempt counted
+
+
+def test_outcome_recording_failure_keeps_ideas_and_retries(tmp_path: Path) -> None:
+    db = Database(f"sqlite:///{tmp_path / 'oc.sqlite'}")
+    with db.session() as s:
+        s.add(filing())
+        s.add(FilingTextRow(accession="0000000001-26-000001", text=TEXT))
+
+    def broken_audit(o: object) -> None:
+        raise RuntimeError("database is locked")
+
+    sigs = analyze_recent_8k(db, FilingAnalyzer(FakeCaller(RELEVANT, BUY)), NOW, on_outcome=broken_audit)
+    assert sigs == []  # not marked, nothing lost: it is analysed again next cycle
+    with db.session() as s:
+        assert not s.get(FilingRow, "0000000001-26-000001").analyzed  # type: ignore[union-attr]
+
+
+def test_unknown_model_is_a_configuration_error(tmp_path: Path) -> None:
+    import anthropic
+    import httpx
+
+    db = _two_filings(tmp_path)
+    resp = httpx.Response(404, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    err = anthropic.NotFoundError("model not found", response=resp, body=None)
+    for _ in range(4):
+        analyze_recent_8k(db, FilingAnalyzer(Raising(err)), NOW)
+    with db.session() as s:
+        assert not s.get(FilingRow, "0000000001-26-000001").analyzed  # type: ignore[union-attr]

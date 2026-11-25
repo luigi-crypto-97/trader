@@ -10,7 +10,6 @@
       "Bash(uv run trader doctor)",
       "Bash(uv run trader signals list:*)",
       "Bash(uv run trader signals show:*)",
-      "Bash(uv run trader audit verify)",
       "mcp__trader__get_status",
       "mcp__trader__list_signals",
       "mcp__trader__get_signal",
@@ -31,6 +30,8 @@
       "Read(./.env)",
       "Read(./.env.*)",
       "Read(./config/restricted_list.txt)",
+      "Read(./var/**)",
+      "Grep(./var/**)",
       "Edit(./config/restricted_list.txt)",
       "Bash(cat .env:*)",
       "Bash(cat config/restricted_list.txt:*)"

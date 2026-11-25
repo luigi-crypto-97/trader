@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 OFFSET_KEY = "telegram_update_offset"
+KILL_COMMANDS = frozenset({"/kill", "/stop"})
 API = "https://api.telegram.org"
 
 
@@ -112,6 +113,12 @@ class TelegramBot:
             self._api("getUpdates", offset=offset, timeout=0, allowed_updates=["callback_query", "message"])
             or []
         )
+        # /kill first, for every fetched update and regardless of any deadline: it is a local write,
+        # idempotent, and must never wait behind slower commands or the time budget.
+        for upd in updates:
+            msg = upd.get("message") or {}
+            if self._authorized(msg) and str(msg.get("text", "")).strip().lower() in KILL_COMMANDS:
+                self._kill(system, msg)
         handled = 0
         for upd in updates:
             if deadline is not None and time.monotonic() >= deadline:
@@ -124,19 +131,30 @@ class TelegramBot:
                 if "callback_query" in upd:
                     handled += self._on_callback(upd["callback_query"], system)
                 elif "message" in upd:
-                    handled += self._on_message(upd["message"], system)
+                    handled += self._on_message(upd["message"], system, deadline)
             except Exception as exc:
                 log.warning("telegram update %s failed: %s", upd.get("update_id"), exc)
                 with contextlib.suppress(TelegramError):
                     self.notify(f"Comando non eseguito: {type(exc).__name__}: {str(exc)[:200]}")
         return handled
 
-    def _authorized(self, chat: dict[str, Any] | None) -> bool:
-        return chat is not None and int(chat.get("id", 0)) == self.chat_id
+    def _authorized(self, item: dict[str, Any]) -> bool:
+        """The configured private chat AND its owner (a group member is never authorised)."""
+        chat = (item.get("message") or {}).get("chat") if "data" in item else item.get("chat")
+        sender = item.get("from") or {}
+        return (
+            chat is not None
+            and int(chat.get("id", 0)) == self.chat_id
+            and int(sender.get("id", 0)) == self.chat_id
+        )
+
+    def _kill(self, system: TradingSystem, msg: dict[str, Any]) -> None:
+        if not system.kill_switch_on():
+            system.set_kill_switch(True, reason="telegram command", actor=f"telegram:{msg['chat']['id']}")
 
     def _on_callback(self, cq: dict[str, Any], system: TradingSystem) -> int:
         message = cq.get("message") or {}
-        if not self._authorized(message.get("chat")):
+        if not self._authorized(cq):
             self._api("answerCallbackQuery", callback_query_id=cq["id"], text="Non autorizzato")
             return 0
         data = str(cq.get("data", ""))
@@ -165,12 +183,12 @@ class TelegramBot:
             log.warning("verdict message not delivered: %s", exc)
         return 1
 
-    def _on_message(self, msg: dict[str, Any], system: TradingSystem) -> int:
-        if not self._authorized(msg.get("chat")):
+    def _on_message(self, msg: dict[str, Any], system: TradingSystem, deadline: float | None = None) -> int:
+        if not self._authorized(msg):
             return 0
         text = str(msg.get("text", "")).strip().lower()
-        if text in {"/kill", "/stop"}:
-            system.set_kill_switch(True, reason="telegram command", actor=f"telegram:{msg['chat']['id']}")
+        if text in KILL_COMMANDS:
+            self._kill(system, msg)
             return 1
         if text == "/status":
             st = system.status()
@@ -185,6 +203,9 @@ class TelegramBot:
             if not pending:
                 self.notify("Nessun segnale in attesa.")
             for s in pending:
+                if deadline is not None and time.monotonic() >= deadline:
+                    self.notify("Altri segnali in attesa: ripeti /pending.")
+                    break
                 self.notify_pending(s)
             return 1
         if text in {"/help", "/start"}:
