@@ -10,12 +10,9 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from trader.domain import normalize_ticker
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-
-def normalize_ticker(ticker: str) -> str:
-    """Canonical SEC-style ticker: upper case, share class with '-' (BRK.B and BRK/B -> BRK-B)."""
-    return ticker.strip().upper().replace(".", "-").replace("/", "-").replace(" ", "")
 
 
 class RiskLimits(BaseModel):

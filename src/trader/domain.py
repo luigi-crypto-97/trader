@@ -9,6 +9,7 @@ Conventions:
 from __future__ import annotations
 
 import enum
+import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -27,6 +28,14 @@ def ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         raise ValueError("naive datetime not allowed; use timezone-aware UTC datetimes")
     return value.astimezone(UTC)
+
+
+_TICKER_SEP = re.compile(r"[\s./]+")
+
+
+def normalize_ticker(ticker: str) -> str:
+    """Canonical SEC-style ticker: 'BRK.B', 'BRK/B', 'BRK B' (TWS) and 'brk-b' all become 'BRK-B'."""
+    return _TICKER_SEP.sub("-", ticker.strip().upper()).strip("-")
 
 
 def new_id() -> str:
@@ -212,7 +221,7 @@ class Signal(_Model):
     @field_validator("ticker")
     @classmethod
     def _upper(cls, v: str) -> str:
-        v = v.strip().upper()
+        v = normalize_ticker(v)
         if not v or len(v) > 10:
             raise ValueError("invalid ticker")
         return v

@@ -145,6 +145,8 @@ class MassiveClient:
                     continue
                 out.append(Split(ticker, date.fromisoformat(str(r["execution_date"])), frm, to))
             nxt = data.get("next_url")
+            if nxt and not str(nxt).startswith(BASE_URL + "/"):
+                raise PriceDataError("unexpected pagination host: refusing to send the API key elsewhere")
             url, params = (str(nxt), None) if nxt else (None, None)  # next_url carries the cursor
         return out
 
@@ -186,29 +188,64 @@ class PriceCache:
     def splits_path(self) -> Path:
         return self.dir / "splits.json"
 
-    def write_splits(self, splits: list[Split]) -> None:
-        payload = [
-            {
-                "ticker": x.ticker,
-                "execution_date": x.execution_date.isoformat(),
-                "split_from": str(x.split_from),
-                "split_to": str(x.split_to),
-            }
-            for x in splits
-        ]
-        self.splits_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    def read_splits(self) -> SplitMap:
+    def _load_split_file(self) -> tuple[list[Split], list[tuple[date, date]]]:
         if not self.splits_path.exists():
-            raise PriceDataError("split list missing: run the splits download first")
-        out: SplitMap = {}
-        for r in json.loads(self.splits_path.read_text(encoding="utf-8")):
-            sp = Split(
+            return [], []
+        raw = json.loads(self.splits_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):  # legacy file without coverage information
+            raise PriceDataError("split file has no coverage information: download the splits again")
+        splits = [
+            Split(
                 r["ticker"],
                 date.fromisoformat(r["execution_date"]),
                 Decimal(r["split_from"]),
                 Decimal(r["split_to"]),
             )
+            for r in raw["splits"]
+        ]
+        coverage = [(date.fromisoformat(a), date.fromisoformat(b)) for a, b in raw["coverage"]]
+        return splits, coverage
+
+    def write_splits(self, splits: list[Split], start: date, end: date) -> None:
+        """Merge ``splits`` (the complete list for [start, end]) into the stored list.
+
+        Older splits are never dropped; the covered date ranges are recorded so that
+        :meth:`read_splits` can refuse an incomplete list."""
+        try:
+            existing, coverage = self._load_split_file()
+        except PriceDataError:
+            existing, coverage = [], []
+        merged = {(x.ticker, x.execution_date): x for x in existing}
+        merged.update({(x.ticker, x.execution_date): x for x in splits})
+        joined: list[tuple[date, date]] = []
+        for a, b in sorted([*coverage, (start, end)]):  # union of covered date ranges
+            if joined and a <= joined[-1][1] + timedelta(days=1):
+                joined[-1] = (joined[-1][0], max(joined[-1][1], b))
+            else:
+                joined.append((a, b))
+        payload = {
+            "coverage": [[a.isoformat(), b.isoformat()] for a, b in joined],
+            "splits": [
+                {
+                    "ticker": x.ticker,
+                    "execution_date": x.execution_date.isoformat(),
+                    "split_from": str(x.split_from),
+                    "split_to": str(x.split_to),
+                }
+                for x in sorted(merged.values(), key=lambda x: (x.execution_date, x.ticker))
+            ],
+        }
+        tmp = self.splits_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(self.splits_path)
+
+    def read_splits(self, start: date, end: date) -> SplitMap:
+        """Splits by ticker; fails unless the stored list is known to be complete for [start, end]."""
+        splits, coverage = self._load_split_file()
+        if not any(a <= start and end <= b for a, b in coverage):
+            raise PriceDataError(f"split list does not cover {start}..{end}: download the splits again")
+        out: SplitMap = {}
+        for sp in splits:
             out.setdefault(sp.ticker, []).append(sp)
         for v in out.values():
             v.sort(key=lambda x: x.execution_date)

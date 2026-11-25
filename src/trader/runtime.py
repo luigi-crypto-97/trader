@@ -119,7 +119,8 @@ class Runtime:
                 now,
                 on_outcome=self._record_llm_outcome,
             )
-        return [(s, self.system.submit_signal(s)) for s in produced]
+        tradable = [s for s in produced if not self.limits.is_restricted(s.ticker)]  # private list
+        return [(s, self.system.submit_signal(s)) for s in tradable]
 
 
 def build_runtime(settings: Settings | None = None) -> Runtime:

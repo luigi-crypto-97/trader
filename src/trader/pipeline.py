@@ -50,7 +50,7 @@ from trader.domain import (
     Signal,
     SignalStatus,
 )
-from trader.risk.engine import RiskEngine, RiskState
+from trader.risk.engine import PRIVATE_RULE, RiskEngine, RiskState
 from trader.risk.sizing import EntryPlan, SizingRejection, plan_entry, round_price_down
 
 log = logging.getLogger(__name__)
@@ -201,14 +201,19 @@ class TradingSystem:
                 .limit(1)
             ).first()
             peak_rows = s.scalars(select(EquitySnapshotRow.equity)).all()
-            pending_buys = frozenset(
-                s.scalars(
-                    select(OrderRow.ticker).where(
-                        OrderRow.side == Side.BUY.value,
-                        OrderRow.status.in_([OrderStatus.OPEN.value, OrderStatus.PARTIALLY_FILLED.value]),
-                    )
+            pending_buys: dict[str, Decimal] = {}
+            for o in s.scalars(
+                select(OrderRow).where(
+                    OrderRow.side == Side.BUY.value,
+                    OrderRow.status.in_([OrderStatus.OPEN.value, OrderStatus.PARTIALLY_FILLED.value]),
                 )
-            )
+            ):
+                remaining = max(o.qty - o.filled_qty, Decimal("0"))
+                # Entries are limit orders; a missing price can only be a market order: commit the worst
+                # case of the whole remaining quantity at the last known fill price or the limit.
+                price = o.limit_price or o.avg_fill_price or Decimal("0")
+                committed = remaining * price + self.commissions.estimate(remaining, price)
+                pending_buys[o.ticker] = pending_buys.get(o.ticker, Decimal("0")) + committed
             orders_today = s.scalar(
                 select(func.count())
                 .select_from(OrderRow)
@@ -224,7 +229,13 @@ class TradingSystem:
 
     # --------------------------------------------------------------- signals
     def submit_signal(self, signal: Signal) -> bool:
-        """Insert a new PROPOSED signal. Returns False if its dedup key was already seen."""
+        """Insert a new PROPOSED signal. Returns False if its dedup key was already seen or the ticker
+        is on the private restricted list (dropped without storing the ticker anywhere)."""
+        if self.limits.is_restricted(signal.ticker):
+            self.audit.record(
+                "signal.dropped", {"source": signal.source, "reason": PRIVATE_RULE}, ts=self.clock()
+            )
+            return False
         return submit_signal(self.db, self.audit, signal, self.clock())
 
     def _set_status(self, signal_id: str, status: SignalStatus, reason: str = "", **fields: Any) -> None:
@@ -305,13 +316,18 @@ class TradingSystem:
                 self._set_status(row.id, SignalStatus.REJECTED_RISK, "only long entries are supported")
                 continue
             if self.limits.is_restricted(signal.ticker):
-                self._set_status(row.id, SignalStatus.REJECTED_RISK, "ticker on restricted list")
+                self._set_status(row.id, SignalStatus.REJECTED_RISK, PRIVATE_RULE)
                 continue
             quote = self.broker.quote(signal.ticker)
             if quote is None:
                 self._set_status(row.id, SignalStatus.REJECTED_RISK, "no market data")
                 continue
-            plan = plan_entry(signal, quote, account, self.limits, self.commissions)
+            # Size against cash not already committed to unfilled BUY orders.
+            committed = self.risk_state().pending_total
+            sizing_account = account.model_copy(
+                update={"settled_cash": max(account.settled_cash - committed, Decimal("0"))}
+            )
+            plan = plan_entry(signal, quote, sizing_account, self.limits, self.commissions)
             if isinstance(plan, SizingRejection):
                 self._set_status(row.id, SignalStatus.REJECTED_RISK, f"sizing: {plan.reason}")
                 continue

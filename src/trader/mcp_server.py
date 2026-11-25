@@ -20,8 +20,10 @@ from sqlalchemy import func, select
 from trader.audit import AuditLog
 from trader.config import Settings
 from trader.db import Database, FilingRow, FilingTextRow, InsiderTransactionRow, SignalRow
-from trader.domain import Signal, SignalStatus
+from trader.domain import Signal, SignalStatus, normalize_ticker
 from trader.pipeline import KILL_SWITCH_KEY, LAST_ACCOUNT_KEY, signal_row_to_dict, submit_signal
+
+MAX_PROPOSALS_PER_DAY = 20
 
 INSTRUCTIONS = (
     "Research lab for an own-account, long-only US equity system. Use the read tools to study SEC "
@@ -174,6 +176,12 @@ def build_server(lab: Lab | None = None) -> MCPServer:
         if not evidence:
             return {"queued": False, "error": "evidence is required"}
         now = lab.now()
+        # A daily cap limits how fast an agent could probe which tickers are not tradable.
+        quota_key = f"mcp_proposals:{now.date().isoformat()}"
+        used = int(lab.db.kv_get(quota_key, 0))
+        if used >= MAX_PROPOSALS_PER_DAY:
+            return {"queued": False, "error": "daily proposal limit reached"}
+        lab.db.kv_set(quota_key, used + 1)
         try:
             signal = Signal(
                 source="mcp_research",
@@ -183,7 +191,7 @@ def build_server(lab: Lab | None = None) -> MCPServer:
                 stop_loss_pct=Decimal(str(stop_loss_pct)),
                 thesis=thesis[:4000],
                 evidence=[{"ref": e[:500]} for e in evidence[:10]],
-                dedup_key=f"mcp_research:{ticker.upper()}:{now.date().isoformat()}",
+                dedup_key=f"mcp_research:{normalize_ticker(ticker)}:{now.date().isoformat()}",
                 created_at=now,
             )
         except ValueError as exc:

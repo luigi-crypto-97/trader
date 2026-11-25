@@ -130,7 +130,7 @@ class EdgarIngestor:
                     report.errors.append(msg)
         finally:
             if self.workers > 1:
-                pool.shutdown(wait=True)
+                pool.shutdown(wait=True, cancel_futures=True)
         return report
 
     def store(self, sub: Submission, entry: IndexEntry, tickers: dict[int, str]) -> int:

@@ -351,5 +351,35 @@ def test_massive_raw_bars_and_split_pagination(tmp_path: Path) -> None:
     splits = client.splits(date(2025, 1, 1), date(2025, 12, 31))
     assert [(s.ticker, s.ratio) for s in splits] == [("ACME", D("0.1")), ("BRK-B", D("3"))]
     cache = PriceCache(tmp_path / "px")
-    cache.write_splits(splits)
-    assert cache.read_splits()["BRK-B"][0].execution_date == date(2025, 6, 2)
+    cache.write_splits(splits, date(2025, 1, 1), date(2025, 12, 31))
+    assert cache.read_splits(date(2025, 2, 1), date(2025, 7, 1))["BRK-B"][0].execution_date == date(
+        2025, 6, 2
+    )
+
+
+def test_split_store_merges_and_enforces_coverage(tmp_path: Path) -> None:
+    from trader.marketdata import Split
+
+    cache = PriceCache(tmp_path / "px")
+    old = Split("OLD", date(2025, 1, 10), D("1"), D("2"))
+    new = Split("NEW", date(2025, 9, 1), D("10"), D("1"))
+    cache.write_splits([old], date(2025, 1, 1), date(2025, 6, 30))
+    cache.write_splits([new], date(2025, 7, 1), date(2025, 12, 31))  # later, partial download
+    full = cache.read_splits(date(2025, 1, 2), date(2025, 12, 30))
+    assert set(full) == {"OLD", "NEW"}  # the older split is not lost
+    with pytest.raises(PriceDataError):
+        cache.read_splits(date(2024, 12, 1), date(2025, 12, 30))  # bars older than the covered range
+    cache.splits_path.write_text("[]")  # legacy format without coverage
+    with pytest.raises(PriceDataError):
+        cache.read_splits(date(2025, 1, 2), date(2025, 1, 3))
+
+
+def test_split_pagination_refuses_foreign_host() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [], "next_url": "https://evil.example/steal"})
+
+    client = MassiveClient(
+        api_key="k", http=httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda s: None
+    )
+    with pytest.raises(PriceDataError):
+        client.splits(date(2025, 1, 1), date(2025, 2, 1))

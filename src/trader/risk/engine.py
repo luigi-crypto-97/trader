@@ -11,6 +11,7 @@ never be blocked. The account is long-only: a SELL can never exceed the quantity
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -28,7 +29,15 @@ class RiskState:
     orders_today: int
     start_of_day_equity: Decimal | None
     peak_equity: Decimal | None
-    pending_buys: frozenset[str] = frozenset()  # tickers with BUY orders sent but not yet filled
+    # Committed cash of BUY orders sent but not yet filled: ticker -> remaining notional + commission.
+    pending_buys: Mapping[str, Decimal] = field(default_factory=dict)
+
+    @property
+    def pending_total(self) -> Decimal:
+        return sum(self.pending_buys.values(), Decimal("0"))
+
+
+PRIVATE_RULE = "private rule"
 
 
 @dataclass(frozen=True)
@@ -49,9 +58,13 @@ class RiskDecision:
         return [c for c in self.checks if not c.passed]
 
     def summary(self) -> str:
+        """Human-readable violations. The restricted-list check is reported without its name so that
+        the private list cannot be inferred from stored reasons."""
         if self.approved:
             return "approved"
-        return "; ".join(f"{c.name}: {c.detail}" for c in self.violations)
+        return "; ".join(
+            PRIVATE_RULE if c.name == "not_restricted" else f"{c.name}: {c.detail}" for c in self.violations
+        )
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -154,6 +167,7 @@ class RiskEngine:
         c.add("in_universe", lim.in_universe(order.ticker), "whitelist check")
         held = order.ticker in account.positions
         pending = order.ticker in state.pending_buys
+        pending_total = state.pending_total
         c.add(
             "no_add_to_position",
             lim.allow_add_to_position or not (held or pending),
@@ -202,20 +216,23 @@ class RiskEngine:
                 commission / notional <= lim.max_commission_pct,
                 f"commission {commission} = {_pct(commission / notional)} of notional",
             )
+        # Cash already committed to unfilled BUY orders is not available (no broker reserves it).
         c.add(
             "settled_cash",
-            notional + commission <= account.settled_cash,
-            f"needs {notional + commission}, settled cash {account.settled_cash}",
+            notional + commission + pending_total <= account.settled_cash,
+            f"needs {notional + commission} + pending {pending_total}, settled cash {account.settled_cash}",
         )
 
         if equity > 0:
             existing = account.positions.get(order.ticker)
             existing_value = existing.market_value if existing else Decimal("0")
-            pos_pct = (existing_value + notional) / equity
+            same_pending = state.pending_buys.get(order.ticker, Decimal("0"))
+            pos_pct = (existing_value + same_pending + notional) / equity
             c.add("max_position", pos_pct <= lim.max_position_pct, f"position {_pct(pos_pct)} of equity")
-            gross_pct = (account.gross_exposure + notional) / equity
+            gross_pct = (account.gross_exposure + pending_total + notional) / equity
             c.add("max_gross_exposure", gross_pct <= lim.max_gross_exposure_pct, f"gross {_pct(gross_pct)}")
-            opened = len(account.positions) + (0 if existing else 1)
+            names = set(account.positions) | set(state.pending_buys)
+            opened = len(names) + (0 if order.ticker in names else 1)
             c.add(
                 "max_positions", opened <= lim.max_positions, f"{opened} positions (max {lim.max_positions})"
             )

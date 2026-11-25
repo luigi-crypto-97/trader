@@ -189,3 +189,109 @@ def test_cli_sim_quote_persists(cli_env: Path) -> None:
     assert runner.invoke(app, ["sim", "quote", "ACME", "50"]).exit_code == 0
     db = Database(f"sqlite:///{cli_env / 'lab.sqlite'}")
     assert "ACME" in db.kv_get("sim_broker")["quotes"]
+
+
+def test_restricted_never_visible_through_mcp(tmp_path: Path) -> None:
+    from trader.audit import AuditLog
+    from trader.broker.commissions import IbkrTieredUS
+    from trader.broker.simulated import SimulatedBroker
+    from trader.domain import Signal
+    from trader.pipeline import TradingSystem
+
+    st = settings(tmp_path)
+    lab = Lab(st)
+    server = build_server(lab)
+    system = TradingSystem(
+        db=lab.db,
+        broker=SimulatedBroker(settled_cash=D("1000")),
+        limits=st.risk_limits(),
+        commissions=IbkrTieredUS(),
+        audit=AuditLog(lab.db),
+    )
+    quant = Signal(
+        source="insider_cluster",
+        ticker="SECRT",
+        horizon_days=30,
+        conviction=D("0.8"),
+        stop_loss_pct=D("0.1"),
+        thesis="t",
+        dedup_key="q1",
+    )
+    system.submit_signal(quant)
+    system.run_cycle()
+    call(
+        server,
+        "propose_signal",
+        {
+            "ticker": "secrt",
+            "thesis": "t",
+            "horizon_days": 20,
+            "conviction": 0.7,
+            "stop_loss_pct": 0.08,
+            "evidence": ["x"],
+        },
+    )
+    exposed = json.dumps(
+        [call(server, "list_signals"), call(server, "audit_tail", {"n": 200}), call(server, "get_status")]
+    )
+    assert "SECRT" not in exposed.upper()
+
+
+def test_mcp_daily_proposal_cap(tmp_path: Path) -> None:
+    from trader.mcp_server import MAX_PROPOSALS_PER_DAY
+
+    server = build_server(Lab(settings(tmp_path)))
+    for i in range(MAX_PROPOSALS_PER_DAY):
+        call(
+            server,
+            "propose_signal",
+            {
+                "ticker": f"T{i}",
+                "thesis": "t",
+                "horizon_days": 5,
+                "conviction": 0.6,
+                "stop_loss_pct": 0.05,
+                "evidence": ["x"],
+            },
+        )
+    over = call(
+        server,
+        "propose_signal",
+        {
+            "ticker": "LAST",
+            "thesis": "t",
+            "horizon_days": 5,
+            "conviction": 0.6,
+            "stop_loss_pct": 0.05,
+            "evidence": ["x"],
+        },
+    )
+    assert over == {"queued": False, "error": "daily proposal limit reached"}
+
+
+def test_cli_public_rejections_hide_private_rule() -> None:
+    from datetime import date
+
+    from trader.cli import public_rejections
+
+    rej = [
+        (date(2025, 1, 2), "AAA", "private rule; min_price: x"),
+        (date(2025, 1, 2), "BBB", "liquidity_adv: x"),
+    ]
+    assert public_rejections(rej) == [rej[1]]
+
+
+def test_domain_normalizes_tickers() -> None:
+    from trader.domain import Signal, normalize_ticker
+
+    assert normalize_ticker(" brk b ") == normalize_ticker("BRK.B") == normalize_ticker("BRK/B") == "BRK-B"
+    s = Signal(
+        source="t",
+        ticker="brk.b",
+        horizon_days=5,
+        conviction=D("0.5"),
+        stop_loss_pct=D("0.1"),
+        thesis="t",
+        dedup_key="d",
+    )
+    assert s.ticker == "BRK-B"

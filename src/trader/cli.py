@@ -46,6 +46,13 @@ def _out(obj: Any) -> None:
     typer.echo(json.dumps(obj, indent=2, default=str, ensure_ascii=False))
 
 
+def public_rejections(rejected: list[tuple[date, str, str]]) -> list[tuple[date, str, str]]:
+    """Backtest rejections minus those caused by the private restricted list."""
+    from trader.risk.engine import PRIVATE_RULE
+
+    return [r for r in rejected if PRIVATE_RULE not in r[2]]
+
+
 def _rt() -> Runtime:
     return build_runtime(Settings())
 
@@ -376,8 +383,7 @@ def backtest(
                 "metrics": result.metrics(),
                 "signals": len(timed),
                 "trades": len(result.trades),
-                # restricted-list rejections are omitted: the list is private
-                "rejected_sample": [r for r in result.rejected if "not_restricted" not in r[2]][:20],
+                "rejected_sample": public_rejections(result.rejected)[:20],
             }
         )
     finally:
@@ -396,7 +402,10 @@ def data_prices(start: str, end: str) -> None:
     s = Settings()
     cache = PriceCache(s.massive_cache_dir)
     client = MassiveClient()
-    cache.write_splits(client.splits(date.fromisoformat(start), datetime.now(UTC).date()))
+    # Splits are fetched for everything already cached too, so the stored list stays complete.
+    first = min([date.fromisoformat(start), *cache.days()[:1]])
+    today = datetime.now(UTC).date()
+    cache.write_splits(client.splits(first, today), first, today)
     n = backfill(
         client,
         cache,
@@ -461,7 +470,12 @@ def research_insider(
     prices = cache.load(tickers | {cfg.benchmark})
     trading_days = sorted(prices[cfg.benchmark])
     results = run_study(
-        variants, trading_days, prices, cfg, limits=s.risk_limits(), splits=cache.read_splits()
+        variants,
+        trading_days,
+        prices,
+        cfg,
+        limits=s.risk_limits(),
+        splits=cache.read_splits(trading_days[0], trading_days[-1]),
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     json_out.parent.mkdir(parents=True, exist_ok=True)

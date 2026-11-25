@@ -147,19 +147,24 @@ def test_restricted_ticker_never_reaches_approval(tmp_path: Path) -> None:
     db = Database(f"sqlite:///{tmp_path / 'r.sqlite'}")
     broker = SimulatedBroker(settled_cash=D("1000"), clock=clock)
     broker.set_quote(quote("ACME", "50", clock()))
-    system = TradingSystem(
-        db=db,
-        broker=broker,
-        limits=RiskLimits(restricted=["ACME"]),
-        commissions=IbkrTieredUS(),
-        audit=AuditLog(db),
-        clock=clock,
-    )
-    sig = make_signal()
-    system.submit_signal(sig)
-    system.run_cycle()
-    s = system.get_signal(sig.id)
-    assert s is not None and s["status"] == "REJECTED_RISK" and "restricted" in s["status_reason"]
+
+    def system_with(restricted: list[str]) -> TradingSystem:
+        return TradingSystem(
+            db=db,
+            broker=broker,
+            limits=RiskLimits(restricted=restricted),
+            commissions=IbkrTieredUS(),
+            audit=AuditLog(db),
+            clock=clock,
+        )
+
+    assert not system_with(["ACME"]).submit_signal(make_signal(key="r0"))  # dropped at the door
+    sig = make_signal(key="r1")
+    assert system_with([]).submit_signal(sig)  # queued before the list changed
+    restricted = system_with(["ACME"])
+    restricted.run_cycle()
+    s = restricted.get_signal(sig.id)
+    assert s is not None and s["status"] == "REJECTED_RISK" and s["status_reason"] == "private rule"
 
 
 def test_outside_session_nothing_happens(env) -> None:  # type: ignore[no-untyped-def]
@@ -284,3 +289,50 @@ def test_second_signal_on_same_ticker_blocked_while_first_order_pending(env) -> 
     )  # type: ignore[index]
     assert "no_add_to_position" in failed["status_reason"]  # type: ignore[index]
     assert len([o for o in broker.orders.values() if o.request.side.value == "BUY"]) == 1
+
+
+def test_pending_order_on_other_ticker_uses_a_position_slot(tmp_path: Path) -> None:
+    clock = Clock(NOW)
+    db = Database(f"sqlite:///{tmp_path / 'slots.sqlite'}")
+    broker = SimulatedBroker(settled_cash=D("1000"), clock=clock, slippage_bps=D("0"))
+    broker.set_quote(quote("ACME", "50", clock()))
+    broker.set_quote(quote("BETA", "40", clock()))
+    system = TradingSystem(
+        db=db,
+        broker=broker,
+        limits=RiskLimits(max_positions=1),
+        commissions=IbkrTieredUS(),
+        audit=AuditLog(db),
+        clock=clock,
+    )
+    a, b = make_signal("ACME", key="ka"), make_signal("BETA", key="kb")
+    system.submit_signal(a)
+    system.run_cycle()
+    system.decide(a.id, approve=True, actor="t")
+    clock.advance(minutes=1)
+    broker.set_quote(quote("ACME", "50.50", clock()))  # limit no longer crosses: ACME order rests
+    system.run_cycle()
+    assert system.get_signal(a.id)["status"] == "ORDERED"  # type: ignore[index]
+    system.submit_signal(b)
+    clock.advance(minutes=1)
+    broker.set_quote(quote("BETA", "40", clock()))
+    system.run_cycle()
+    s_b = system.get_signal(b.id)
+    assert s_b is not None and s_b["status"] == "REJECTED_RISK" and "max_positions" in s_b["status_reason"]
+
+
+def test_restricted_signal_dropped_without_trace(tmp_path: Path) -> None:
+    clock = Clock(NOW)
+    db = Database(f"sqlite:///{tmp_path / 'priv.sqlite'}")
+    broker = SimulatedBroker(settled_cash=D("1000"), clock=clock)
+    system = TradingSystem(
+        db=db,
+        broker=broker,
+        limits=RiskLimits(restricted=["SECRT"]),
+        commissions=IbkrTieredUS(),
+        audit=AuditLog(db),
+        clock=clock,
+    )
+    assert not system.submit_signal(make_signal("SECRT", key="p1"))
+    assert system.list_signals() == []
+    assert "SECRT" not in str(system.audit.tail(50))

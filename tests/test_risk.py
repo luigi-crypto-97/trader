@@ -284,7 +284,7 @@ def test_commission_model() -> None:
 
 def test_pending_buy_blocks_second_entry_and_check_reported(make_quote, make_account, now) -> None:  # type: ignore[no-untyped-def]
     eng = engine(RiskLimits())
-    pending = RiskState(False, 0, D("1000"), D("1000"), pending_buys=frozenset({"ACME"}))
+    pending = RiskState(False, 0, D("1000"), D("1000"), pending_buys={"ACME": D("100")})
     d = eng.evaluate(buy(), quote=make_quote(), account=make_account(), state=pending, now=now)
     assert "no_add_to_position" in failed(d)
     fresh = eng.evaluate(buy(), quote=make_quote(), account=make_account(), state=CLEAN, now=now)
@@ -294,9 +294,28 @@ def test_pending_buy_blocks_second_entry_and_check_reported(make_quote, make_acc
 
 def test_restricted_list_normalizes_share_classes(make_quote, make_account, now) -> None:  # type: ignore[no-untyped-def]
     lim = RiskLimits(restricted=["BRK.B"])
-    assert lim.is_restricted("BRK-B") and lim.is_restricted("brk/b")
+    assert lim.is_restricted("BRK-B") and lim.is_restricted("brk/b") and lim.is_restricted("BRK B")
+    assert RiskLimits(restricted=["BRK B"]).is_restricted("BRK-B")  # TWS format in the list
     d = engine(lim).evaluate(
         buy(ticker="BRK-B"), quote=make_quote(ticker="BRK-B"), account=make_account(), state=CLEAN, now=now
     )
     check = next(c for c in d.checks if c.name == "not_restricted")
     assert not check.passed and "BRK" not in check.detail  # the private list is never echoed
+
+
+def test_pending_orders_consume_cash_exposure_and_slots(make_quote, make_account, now) -> None:  # type: ignore[no-untyped-def]
+    lim = RiskLimits(max_positions=2)
+    acct = make_account(cash="200", positions={"OLD": ("1", "50")})
+    state = RiskState(False, 0, D("250"), D("250"), pending_buys={"OTHER": D("180")})
+    d = engine(lim).evaluate(buy(qty="0.5"), quote=make_quote(), account=acct, state=state, now=now)
+    assert {"settled_cash", "max_positions"} <= failed(d)  # 25.4 + 180 > 200 cash; OLD + OTHER + ACME > 2
+    rich = make_account(cash="300", positions={"OLD": ("1", "50")})
+    gross = RiskState(False, 0, D("350"), D("350"), pending_buys={"OTHER": D("290")})
+    g = engine(RiskLimits()).evaluate(buy(qty="0.5"), quote=make_quote(), account=rich, state=gross, now=now)
+    assert "max_gross_exposure" in failed(g)  # 50 held + 290 pending + 25 new > 350 equity
+
+
+def test_summary_never_names_the_private_rule(make_quote, make_account, now) -> None:  # type: ignore[no-untyped-def]
+    lim = RiskLimits(restricted=["ACME"])
+    d = engine(lim).evaluate(buy(), quote=make_quote(), account=make_account(), state=CLEAN, now=now)
+    assert not d.approved and "restricted" not in d.summary() and "private rule" in d.summary()
